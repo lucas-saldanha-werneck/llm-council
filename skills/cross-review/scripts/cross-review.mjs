@@ -19,7 +19,10 @@ const SKILLS = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.
 const COUNCIL = path.join(SKILLS, "llm-council", "scripts", "council.mjs");
 const USER_DIR = process.env.LLM_COUNCIL_DIR || path.join(os.homedir(), ".config", "llm-council");
 const SESSIONS_DIR = path.join(USER_DIR, "sessions");
-const TIMEOUT_MS = Number(process.env.CROSS_REVIEW_TIMEOUT_MS) || 900000;
+// Per reviewer. The council's worst case is 3 stages x 240 s per call (its timeout_ms), plus a
+// fallback retry: ~24 min. 25 min by default; raise it if you raised the council's timeout_ms.
+const TIMEOUT_MS = Number(process.env.CROSS_REVIEW_TIMEOUT_MS) || 1500000;
+const IS_WIN = process.platform === "win32";
 const USAGE = "Usage: node cross-review.mjs [--dry-run] [--no-codex] [--cd <dir>] --plan-file <file>   (- = stdin)";
 
 // ---------- CLI ----------
@@ -43,13 +46,19 @@ try {
   process.exit(1);
 }
 if (!plan) { console.error("ERROR: the plan is empty."); process.exit(1); }
+opts.cd = path.resolve(opts.cd); // Codex gets cwd and -C; a relative path would apply twice.
 if (!fs.existsSync(opts.cd) || !fs.statSync(opts.cd).isDirectory()) {
   console.error(`ERROR: --cd ${opts.cd} is not a folder.`);
   process.exit(1);
 }
 
 // One prompt, used word for word by both reviewers.
+// The council names its transcript after the first words of the question, so the plan's
+// first line goes first: otherwise every transcript would get the same name.
+const TITLE = plan.split("\n").find(l => l.trim()).replace(/\s+/g, " ").trim().slice(0, 60);
 const PROMPT = [
+  `Plan review: ${TITLE}`,
+  "",
   "You are an independent, critical reviewer. Review the plan or decision below before anyone acts on it.",
   "Answer: Is it right? What is missing? What is the biggest risk? Is there a better option?",
   "If it compares options, say which one is best and why, and consider every option it lists.",
@@ -62,9 +71,18 @@ const PROMPT = [
 ].join("\n");
 
 // ---------- helpers ----------
+const isJs = f => /\.(m?js|cjs)$/i.test(f);
+function usable(f) {
+  try {
+    if (!fs.statSync(f).isFile()) return false;
+    if (!IS_WIN && !isJs(f)) fs.accessSync(f, fs.constants.X_OK); // a non-executable file is not a program
+    return true;
+  } catch { return false; }
+}
+
 function findOnPath(name) {
-  if (path.isAbsolute(name)) return fs.existsSync(name) ? name : null;
-  const exts = process.platform === "win32"
+  if (path.isAbsolute(name)) return usable(name) ? name : null;
+  const exts = IS_WIN
     ? (process.env.PATHEXT || ".EXE;.CMD;.BAT").split(";").filter(Boolean).concat([""])
     : [""];
   for (const dir of (process.env.PATH || "").split(path.delimiter)) {
@@ -73,50 +91,93 @@ function findOnPath(name) {
       const p = path.join(dir, name + ext.toLowerCase());
       const q = path.join(dir, name + ext);
       for (const c of [p, q]) {
-        try { if (fs.statSync(c).isFile()) return c; } catch { /* next */ }
+        if (usable(c)) return c;
       }
     }
   }
   return null;
 }
 
+// cmd.exe quoting for a .cmd shim (same rules as cross-spawn): quote for the program's own
+// argv parser, then caret-escape every cmd metacharacter (% and ! included) twice, once for
+// `cmd /c` and once for the shim's own `%*` line.
+const CMD_META = /([()\][%!^"`<>&|;, *?])/g;
+const cmdArg = s => `"${s.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, "$1$1")}"`
+  .replace(CMD_META, "^$1").replace(CMD_META, "^$1");
+
+const running = new Set();
+function killTree(child) {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    if (IS_WIN) spawn("taskkill", ["/T", "/F", "/PID", String(child.pid)], { stdio: "ignore", windowsHide: true });
+    else process.kill(-child.pid, "SIGKILL"); // the whole process group, grandchildren included
+  } catch { /* already gone */ }
+}
+
 // Runs a program; stdin text optional. JS files run with this Node (lets tests use a fake codex.mjs).
+// Resolves {code, signal, timedOut, stdout, stderr}; on timeout it resolves right away, even if
+// a grandchild still holds the pipes open.
 function runProgram(file, args, { input = "", cwd, onStderr } = {}) {
   return new Promise(resolve => {
-    let cmd = file, cmdArgs = args, shell = false;
-    if (/\.(m?js|cjs)$/i.test(file)) { cmd = process.execPath; cmdArgs = [file, ...args]; }
-    else if (process.platform === "win32" && /\.(cmd|bat)$/i.test(file)) {
-      // .cmd needs a shell on Windows. Only fixed flags and paths go on this line, never the plan.
-      shell = true;
-      const q = s => (/[\s"&|<>^]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
-      cmd = q(file); cmdArgs = args.map(q);
+    let cmd = file, cmdArgs = args, extra = {};
+    if (isJs(file)) { cmd = process.execPath; cmdArgs = [file, ...args]; }
+    else if (IS_WIN && /\.(cmd|bat)$/i.test(file)) {
+      // .cmd needs cmd.exe. Only fixed flags and paths go on this line, never the plan.
+      cmd = process.env.ComSpec || "cmd.exe";
+      cmdArgs = ["/d", "/s", "/c", `"${[file.replace(CMD_META, "^$1"), ...args.map(cmdArg)].join(" ")}"`];
+      extra = { windowsVerbatimArguments: true };
     }
-    let stdout = "", stderr = "", done = false;
-    const child = spawn(cmd, cmdArgs, { cwd, shell, windowsHide: true });
-    const timer = setTimeout(() => { child.kill(); stderr += `\n(timed out after ${TIMEOUT_MS} ms)`; }, TIMEOUT_MS);
+    let stdout = "", stderr = "", done = false, timedOut = false;
+    // POSIX: its own process group, so a timeout can kill everything it started.
+    const child = spawn(cmd, cmdArgs, { cwd, windowsHide: true, detached: !IS_WIN, ...extra });
+    running.add(child);
+    const finish = (code, signal) => {
+      if (done) return;
+      done = true; clearTimeout(timer); running.delete(child);
+      resolve({ code, signal, timedOut, stdout, stderr });
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killTree(child);
+      for (const s of [child.stdin, child.stdout, child.stderr]) s?.destroy();
+      finish(null, null);
+    }, TIMEOUT_MS);
     child.stdout.on("data", d => (stdout += d));
     child.stderr.on("data", d => { stderr += d; if (onStderr) onStderr(d); });
-    const finish = code => { if (done) return; done = true; clearTimeout(timer); resolve({ code, stdout, stderr }); };
-    child.on("error", e => { stderr += `\n${e.message}`; finish(127); });
-    child.on("close", code => finish(code ?? 1));
+    child.on("error", e => { stderr += `\n${e.message}`; finish(127, null); });
+    child.on("close", (code, signal) => finish(code, signal));
     child.stdin.on("error", () => {});
     child.stdin.end(input);
   });
+}
+
+// Status line for a reviewer that gave no usable answer.
+function failure(r) {
+  if (r.timedOut) return `timed out after ${TIMEOUT_MS / 1000} s (limit: CROSS_REVIEW_TIMEOUT_MS)`;
+  if (r.signal) return `killed by ${r.signal}`;
+  if (r.code === 0) return "answered with no text";
+  return `failed (exit ${r.code})`;
 }
 
 const tail = (s, n = 15) => s.trim().split("\n").slice(-n).join("\n");
 
 // ---------- reviewers ----------
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "cross-review-"));
+// The temp folder holds the plan: remove it however the run ends, and stop the reviewers too.
+process.on("exit", () => { try { fs.rmSync(work, { recursive: true, force: true }); } catch { /* best effort */ } });
+for (const [sig, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
+  process.on(sig, () => { for (const ch of running) killTree(ch); process.exit(code); });
+}
 const promptFile = path.join(work, "plan-review.txt");
 fs.writeFileSync(promptFile, PROMPT, { mode: 0o600 });
 
 async function council() {
   const args = [COUNCIL, ...(opts.dryRun ? ["--dry-run"] : []), "--question-file", promptFile];
   const r = await runProgram(process.execPath, args, { onStderr: d => process.stderr.write(`[council] ${d}`) });
-  return r.code === 0
-    ? { status: "ok", text: r.stdout.trim() }
-    : { status: `failed (exit ${r.code})`, text: `The council failed (exit ${r.code}):\n\n\`\`\`\n${tail(r.stderr || r.stdout)}\n\`\`\`` };
+  const text = r.stdout.trim();
+  if (r.code === 0 && text) return { status: "ok", text };
+  const status = failure(r);
+  return { status, text: `The council ${status}:\n\n\`\`\`\n${tail(r.stderr || r.stdout) || "(no output)"}\n\`\`\`` };
 }
 
 async function codex() {
@@ -138,8 +199,8 @@ async function codex() {
   try { last = fs.readFileSync(outFile, "utf8").trim(); } catch { /* fall back to stdout */ }
   const text = last || r.stdout.trim();
   if (r.code === 0 && text) return { status: "ok", text };
-  return { status: `failed (exit ${r.code})`,
-    text: `Codex failed (exit ${r.code}):\n\n\`\`\`\n${tail(r.stderr || r.stdout) || "(no output)"}\n\`\`\`` };
+  const status = failure(r);
+  return { status, text: `Codex ${status}:\n\n\`\`\`\n${tail(r.stderr || r.stdout) || "(no output)"}\n\`\`\`` };
 }
 
 process.stderr.write(`Cross-review: council${opts.codex ? " + Codex" : ""} in parallel on the same text (${plan.length} chars)\n`);
@@ -147,17 +208,20 @@ const [c, x] = await Promise.all([council(), codex()]);
 fs.rmSync(work, { recursive: true, force: true });
 
 // ---------- transcript ----------
-let transcript = null;
+// Same rules as council.mjs: 0600, never overwrite (wx), a new random name if one already exists.
+let transcript = null, transcriptError = null;
+const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+const body = [`# Cross-review ${stamp}`, "", "## Prompt sent to both", "", PROMPT, "",
+  "## LLM council", "", c.text, "", "## Codex (read-only)", "", x.text, ""].join("\n");
 try {
   fs.mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const file = path.join(SESSIONS_DIR, `${stamp}-cross-review-${crypto.randomBytes(4).toString("hex")}.md`);
-  fs.writeFileSync(file, [`# Cross-review ${stamp}`, "", "## Prompt sent to both", "", PROMPT, "",
-    "## LLM council", "", c.text, "", "## Codex (read-only)", "", x.text, ""].join("\n"), { mode: 0o600, flag: "wx" });
-  transcript = file;
-} catch (e) {
-  process.stderr.write(`ERROR: cross-review transcript not saved: ${e.message}\n`);
-}
+  for (let tries = 0; tries < 5 && !transcript; tries++) {
+    const file = path.join(SESSIONS_DIR, `${stamp}-cross-review-${crypto.randomBytes(4).toString("hex")}.md`);
+    try { fs.writeFileSync(file, body, { mode: 0o600, flag: "wx" }); transcript = file; }
+    catch (e) { transcriptError = e; if (e.code !== "EEXIST") break; }
+  }
+} catch (e) { transcriptError = e; }
+if (!transcript) process.stderr.write(`ERROR: cross-review transcript not saved: ${transcriptError.message}\n`);
 
 // ---------- result ----------
 const ok = [c, x].filter(r => r.status === "ok" || r.status === "dry-run").length;

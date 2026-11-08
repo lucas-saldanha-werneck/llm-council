@@ -16,7 +16,9 @@ Don't rebuild either reviewer by hand.
    unclear what to review, say in one line what you are going to review. If the user compares
    options ("is A the best?"), include every option in the file.
 2. If the question looks trivial and not worth the credits, ask the user before running.
-3. Run (Bash timeout at least 900000 ms; a run usually takes 2 to 6 minutes):
+3. Run it with the Bash tool's `run_in_background: true` and wait for the completion notification
+   (don't poll, don't sleep). A run usually takes 2 to 6 minutes and can take up to 25, longer than
+   the Bash tool's 10-minute foreground limit:
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/skills/cross-review/scripts/cross-review.mjs" --plan-file "/path/to/plan.md"
@@ -51,3 +53,5 @@ cross-review transcript path (from `## Status`).
 - Exit code 5: neither answered. Show both errors. Council exit code 2 means no OpenRouter key;
   see the llm-council skill for the fixes.
 - Exit code 1: missing or unreadable plan file, or a bad argument.
+- `timed out after N s`: that reviewer hit the per-reviewer limit (`CROSS_REVIEW_TIMEOUT_MS`,
+  default 1500000 = 25 min) and was stopped with everything it started. Deliver the other one.

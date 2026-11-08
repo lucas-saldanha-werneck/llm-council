@@ -180,7 +180,9 @@ agree) and a short combined recommendation.
 Options: `--cd <folder>` (the folder Codex may read, default the current one), `--no-codex`,
 `--dry-run` (fake council, Codex not started), `--plan-file -` (stdin).
 `CROSS_REVIEW_CODEX` points at another `codex` binary; `CROSS_REVIEW_TIMEOUT_MS` (default
-900000) limits each reviewer.
+1500000, 25 min) limits each reviewer. The default covers the council's worst case (3 stages of
+240 s calls plus a fallback retry); raise it if you raised the council's `timeout_ms`. A reviewer
+that hits the limit is stopped with every process it started and reported as `timed out after N s`.
 
 If one reviewer fails, you still get the other, with the real error of the one that failed.
 Exit codes: 0 when at least one reviewer answered, 1 for a bad argument or plan file, 5 when
