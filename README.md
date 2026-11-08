@@ -10,6 +10,10 @@ The idea and the three stages come from Andrej Karpathy's
 same flow as a Claude Code skill: one Node script that calls the OpenRouter API, with no server
 or browser.
 
+The plugin also has a second skill, [cross-review](#cross-review-council--codex): it sends the same
+plan to the council and to OpenAI's Codex at the same time, and Claude merges both answers into
+one table of findings.
+
 ## What Claude sees
 
 Ask Claude something like "ask the llm council whether we should use Postgres or SQLite for a
@@ -130,8 +134,64 @@ change them. `--question-file -` reads the question from stdin. A plain quoted a
 This is an instruction to Claude, not a sandbox. Whether you see each command before it runs
 depends on your Claude Code permission settings.
 
+## Cross-review (council + Codex)
+
+Ask Claude to "cross-review this plan" or "check it with the council and Codex". Claude writes the
+plan to a temporary file and runs:
+
+```
+node skills/cross-review/scripts/cross-review.mjs --plan-file /tmp/plan.md
+```
+
+The script builds one prompt (the plan, plus "Is it right? What is missing? What is the biggest
+risk? Is there a better option?") and sends exactly that text, in parallel, to:
+
+- the LLM council (`council.mjs --question-file`), and
+- Codex, as `codex exec -s read-only --skip-git-repo-check -C <folder> -o <file> -`, with the
+  prompt on stdin. The read-only sandbox means Codex can read the folder for context but cannot
+  change anything.
+
+It prints both answers and a status block (output of `--dry-run` with Codex not installed, cut):
+
+```
+# Cross-review
+
+Both reviewers got the same text: /tmp/plan.md (74 chars). Codex is not installed: this is a council-only review.
+
+## LLM council
+
+## Council final answer
+...
+
+## Codex (read-only)
+
+Not run: the `codex` CLI was not found on PATH, so this is a council-only review. ...
+
+## Status
+
+- Council: ok
+- Codex: not installed
+- Cross-review transcript: /home/you/.config/llm-council/sessions/2026-11-08T16-25-20-cross-review-49ea5147.md
+```
+
+Claude then gives you one table (finding, found by Council / Codex / both, severity, do they
+agree) and a short combined recommendation.
+
+Options: `--cd <folder>` (the folder Codex may read, default the current one), `--no-codex`,
+`--dry-run` (fake council, Codex not started), `--plan-file -` (stdin).
+`CROSS_REVIEW_CODEX` points at another `codex` binary; `CROSS_REVIEW_TIMEOUT_MS` (default
+900000) limits each reviewer.
+
+If one reviewer fails, you still get the other, with the real error of the one that failed.
+Exit codes: 0 when at least one reviewer answered, 1 for a bad argument or plan file, 5 when
+neither answered. The cross-review transcript (prompt and both answers) is saved as a `0600`
+file next to the council transcripts.
+
 ## Optional requirements
 
+- **Codex CLI (`codex`)**, for cross-review. Install it from
+  [github.com/openai/codex](https://github.com/openai/codex) and sign in. Without it, cross-review
+  runs the council alone and says so.
 - **1Password CLI (`op`)**, if you keep the key in 1Password. Start Claude Code with
   `op run --env-file=<file> -- claude`, where the file maps `OPENROUTER_API_KEY` to your secret
   reference. Without `op`, use the environment variable or the `.env` file above.
@@ -183,12 +243,16 @@ remove them.
 node --test tests/test_council.mjs
 ```
 
-The tests run the script against a local fake OpenRouter server. They never call the real API.
+The tests run the scripts against a local fake OpenRouter server and a fake `codex`. They never
+call the real API or the real Codex.
 
 ## Limits
 
 - The test suite fakes every HTTP reply. A live run against OpenRouter was not made for this
   release.
+- Cross-review was tested with a fake `codex` that records its arguments and stdin. It was not run
+  against the real Codex CLI. The flags were checked against `codex exec --help` of codex-cli
+  0.166.0.
 - Tested on macOS with Node.js 26 and Claude Code 2.1.319. Not tested on Linux or Windows.
 - Models come and go on OpenRouter. If a default disappears, override it in your config.
 
