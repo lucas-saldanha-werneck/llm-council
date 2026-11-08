@@ -21,7 +21,22 @@ function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "llm-council-test-"));
 }
 
-// Fake OpenRouter. `behavior(model)` may return {status, body} to override the normal reply.
+// Labels in a review prompt, ordered by PREFERENCE (best first).
+function preferredLabels(body) {
+  const user = body.messages[1].content;
+  const labels = [...user.matchAll(/### Answer ([A-Z])\nANSWER FROM (\S+)/g)]
+    .map(m => ({ label: m[1], model: m[2] }));
+  labels.sort((a, b) => PREFERENCE.indexOf(a.model) - PREFERENCE.indexOf(b.model));
+  return labels.map(l => l.label);
+}
+const isReview = body => body.messages[0].content.includes("impartial reviewer");
+const isChairman = body => body.messages[0].content.includes("Chairman");
+const reply = (content, extra = {}) => ({
+  status: 200,
+  body: { choices: [{ message: { content }, ...extra }], usage: { cost: 0.01, total_tokens: 100 } },
+});
+
+// Fake OpenRouter. `behavior(model, body)` may return {status, body} to override the normal reply.
 async function startServer(behavior = () => null) {
   const requests = [];
   const server = http.createServer((req, res) => {
@@ -30,7 +45,7 @@ async function startServer(behavior = () => null) {
     req.on("end", () => {
       const body = JSON.parse(raw);
       requests.push({ headers: req.headers, body });
-      const override = behavior(body.model);
+      const override = behavior(body.model, body);
       if (override) {
         res.writeHead(override.status, { "Content-Type": "application/json" });
         return res.end(JSON.stringify(override.body));
@@ -39,11 +54,7 @@ async function startServer(behavior = () => null) {
       let content;
       if (system.includes("impartial reviewer")) {
         // Map each label to the model named in its answer, then rank by PREFERENCE.
-        const user = body.messages[1].content;
-        const labels = [...user.matchAll(/### Answer ([A-Z])\nANSWER FROM (\S+)/g)]
-          .map(m => ({ label: m[1], model: m[2] }));
-        labels.sort((a, b) => PREFERENCE.indexOf(a.model) - PREFERENCE.indexOf(b.model));
-        content = JSON.stringify({ ranking: labels.map(l => l.label), assessments: {} });
+        content = JSON.stringify({ ranking: preferredLabels(body), assessments: {} });
       } else if (system.includes("Chairman")) {
         content = "FINAL SYNTHESIS";
       } else {
@@ -61,15 +72,18 @@ async function startServer(behavior = () => null) {
   return { url, requests, close: () => new Promise(r => server.close(r)) };
 }
 
-function run(args, env) {
+function run(args, env, input) {
   return new Promise(resolve => {
     const home = env.HOME || tmpDir();
     const clean = { PATH: process.env.PATH, HOME: home, ...env };
-    execFile(process.execPath, [SCRIPT, ...args], { env: clean, timeout: 30000 }, (err, stdout, stderr) => {
+    const child = execFile(process.execPath, [SCRIPT, ...args], { env: clean, timeout: 30000 }, (err, stdout, stderr) => {
       resolve({ code: err ? err.code : 0, stdout, stderr });
     });
+    child.stdin.end(input ?? "");
   });
 }
+
+const TWO = { LLM_COUNCIL_MODELS: "openai/gpt-5.6-terra,x-ai/grok-4.5", LLM_COUNCIL_CHAIRMAN: "c/chair" };
 
 test("dry run completes, prints the result and writes a transcript", async () => {
   const dir = tmpDir();
@@ -79,7 +93,7 @@ test("dry run completes, prints the result and writes a transcript", async () =>
   assert.match(r.stdout, /\| # \| Model \| Answer \| Mean position \|/);
   const files = fs.readdirSync(path.join(dir, "sessions"));
   assert.equal(files.length, 1);
-  assert.match(files[0], /is-this-a-test\.md$/);
+  assert.match(files[0], /is-this-a-test-[0-9a-f]{8}\.md$/);
 });
 
 test("no API key: exit code 2 with setup instructions", async () => {
@@ -182,4 +196,143 @@ test("chairman failure still prints the ranking and writes the transcript", asyn
   assert.match(r.stdout, /Chairman unavailable/);
   assert.match(r.stdout, /\| 1 \| openai\/gpt-5\.6-terra \|/);
   assert.equal(fs.readdirSync(path.join(dir, "sessions")).length, 1);
+});
+
+// ---------- Round-2 audit regressions ----------
+
+test("--question-file reads the question from a file, with shell characters kept literally", async () => {
+  const srv = await startServer();
+  const dir = tmpDir();
+  const q = 'Is `echo $(whoami)` safe? Say "no".\nSecond line.';
+  const qf = path.join(dir, "question.txt");
+  fs.writeFileSync(qf, q);
+  const r = await run(["--question-file", qf], {
+    LLM_COUNCIL_DIR: dir, LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k",
+  });
+  await srv.close();
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(srv.requests[0].body.messages[1].content, q);
+});
+
+test("--question-file - reads the question from stdin", async () => {
+  const srv = await startServer();
+  const q = "From stdin: $HOME and `id`";
+  const r = await run(["--question-file", "-"], {
+    LLM_COUNCIL_DIR: tmpDir(), LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k",
+  }, q);
+  await srv.close();
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(srv.requests[0].body.messages[1].content, q);
+});
+
+test("SKILL.md never tells Claude to put the question inside a shell command", () => {
+  const skill = fs.readFileSync(path.join(ROOT, "skills", "llm-council", "SKILL.md"), "utf8");
+  assert.doesNotMatch(skill, /council\.mjs" "the user's question"/);
+  assert.match(skill, /--question-file/);
+});
+
+test("an incomplete ballot is ignored and the valid count is shown", async () => {
+  const srv = await startServer((model, body) => {
+    if (!isReview(body)) return null;
+    const best = preferredLabels(body);
+    // grok ranks only its own answer: an incomplete ballot.
+    if (model === "x-ai/grok-4.5") return reply(JSON.stringify({ ranking: [best[1]] }));
+    return null;
+  });
+  const r = await run(["q"], { LLM_COUNCIL_DIR: tmpDir(), LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k", ...TWO });
+  await srv.close();
+  assert.equal(r.code, 0, r.stderr);
+  const rows = r.stdout.split("\n").filter(l => /^\| \d/.test(l));
+  assert.match(rows[0], /openai\/gpt-5\.6-terra \| [AB] \| 1\.00 \|/);
+  assert.match(rows[1], /x-ai\/grok-4\.5 \| [AB] \| 2\.00 \|/);
+  assert.match(r.stdout, /Valid rankings: 1 of 2 reviews/);
+});
+
+test("a ballot with a repeated label is ignored", async () => {
+  const srv = await startServer((model, body) => {
+    if (!isReview(body)) return null;
+    const best = preferredLabels(body);
+    if (model === "x-ai/grok-4.5") return reply(JSON.stringify({ ranking: [best[1], best[1]] }));
+    return null;
+  });
+  const r = await run(["q"], { LLM_COUNCIL_DIR: tmpDir(), LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k", ...TWO });
+  await srv.close();
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /x-ai\/grok-4\.5 \| [AB] \| 2\.00 \|/);
+  assert.match(r.stdout, /Valid rankings: 1 of 2 reviews/);
+});
+
+test("no valid ballot: the ranking is reported as unavailable, not numbered", async () => {
+  const srv = await startServer((model, body) => isReview(body) ? reply("I liked them all.") : null);
+  const r = await run(["q"], { LLM_COUNCIL_DIR: tmpDir(), LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k", ...TWO });
+  await srv.close();
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /Ranking unavailable: 0 of 2 reviews gave a complete ranking/);
+  assert.equal(r.stdout.split("\n").filter(l => /^\| \d/.test(l)).length, 0);
+});
+
+test("concurrent runs of the same question never overwrite each other's transcript", async () => {
+  const srv = await startServer();
+  const dir = tmpDir();
+  const env = { LLM_COUNCIL_DIR: dir, LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k", ...TWO };
+  const results = await Promise.all([1, 2, 3, 4].map(() => run(["same question"], env)));
+  await srv.close();
+  for (const r of results) assert.equal(r.code, 0, r.stderr);
+  const files = fs.readdirSync(path.join(dir, "sessions"));
+  assert.equal(files.length, 4);
+  const printed = results.map(r => r.stdout.match(/Full transcript: (.+)$/m)[1]);
+  assert.equal(new Set(printed).size, 4);
+  for (const p of printed) assert.ok(fs.existsSync(p), p);
+});
+
+test("an unusable transcript folder stops the run before any paid call", async () => {
+  const srv = await startServer();
+  const dir = tmpDir();
+  fs.writeFileSync(path.join(dir, "sessions"), "not a folder");
+  const r = await run(["q"], { LLM_COUNCIL_DIR: dir, LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k", ...TWO });
+  await srv.close();
+  assert.equal(r.code, 4, r.stderr);
+  assert.match(r.stderr, /cannot save transcripts/);
+  assert.equal(srv.requests.length, 0);
+});
+
+test("a transcript write that fails at the end still prints the answer and the cost",
+  { skip: process.platform === "win32" || process.getuid?.() === 0 }, async () => {
+  const dir = tmpDir();
+  const sessions = path.join(dir, "sessions");
+  fs.mkdirSync(sessions);
+  const srv = await startServer((model, body) => {
+    // The folder becomes read-only while the chairman is working.
+    if (isChairman(body)) fs.chmodSync(sessions, 0o500);
+    return null;
+  });
+  const r = await run(["q"], { LLM_COUNCIL_DIR: dir, LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k", ...TWO });
+  await srv.close();
+  if (fs.existsSync(sessions)) fs.chmodSync(sessions, 0o700);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /FINAL SYNTHESIS/);
+  assert.match(r.stdout, /Cost: US\$ 0\.0500/);
+  assert.match(r.stdout, /Transcript not saved:/);
+});
+
+test("a chairman answer cut off by the token limit is flagged", async () => {
+  const srv = await startServer((model, body) =>
+    isChairman(body) ? reply("FINAL SYNTHESIS, half of it", { finish_reason: "length" }) : null);
+  const r = await run(["q"], { LLM_COUNCIL_DIR: tmpDir(), LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k", ...TWO });
+  await srv.close();
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /cut off at the output token limit/);
+  assert.match(r.stderr, /c\/chair.*cut off/);
+});
+
+test("a member answer cut off by the token limit is marked before review", async () => {
+  const srv = await startServer((model, body) =>
+    model === "x-ai/grok-4.5" && !isReview(body) && !isChairman(body)
+      ? reply("ANSWER FROM x-ai/grok-4.5 partial", { finish_reason: "length" }) : null);
+  const r = await run(["q"], { LLM_COUNCIL_DIR: tmpDir(), LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k", ...TWO });
+  await srv.close();
+  assert.equal(r.code, 0, r.stderr);
+  const review = srv.requests.find(q => isReview(q.body));
+  assert.match(review.body.messages[1].content, /partial\n\n\[This answer was cut off at the output token limit\.\]/);
+  assert.match(r.stderr, /x-ai\/grok-4\.5.*cut off/);
 });

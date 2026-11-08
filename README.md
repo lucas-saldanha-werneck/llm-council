@@ -13,13 +13,13 @@ or browser.
 ## What Claude sees
 
 Ask Claude something like "ask the llm council whether we should use Postgres or SQLite for a
-small internal tool". The skill runs the script and Claude gets this back (output of
-`--dry-run`, which fakes the model answers):
+small internal tool". Claude writes your question to a temporary file, runs the script with
+`--question-file`, and gets this back (output of `--dry-run`, which fakes the model answers):
 
 ```
 ## Council final answer
 
-[dry-run] Simulated answer from anthropic/claude-fable-5. {"ranking": ["A", "B", "C", "D"], "assessments": {"A": "solid", "B": "good", "C": "ok", "D": "weak"}}
+[dry-run] Simulated answer from anthropic/claude-fable-5.
 
 ## Ranking (anonymous cross-review)
 
@@ -30,7 +30,9 @@ small internal tool". The skill runs the script and Claude gets this back (outpu
 | 3 | openai/gpt-5.6-terra | C | 3.00 |
 | 4 | google/gemini-3.1-pro-preview | D | 4.00 |
 
-Cost: US$ 0.0000 | Tokens: 0 | Full transcript: /home/you/.config/llm-council/sessions/2026-11-08T13-36-42-should-i-use-postgres-or-sqlite-for-a-small-intern.md
+Valid rankings: 4 of 4 reviews.
+
+Cost: US$ 0.0000 | Tokens: 0 | Full transcript: /home/you/.config/llm-council/sessions/2026-11-08T14-08-41-should-i-use-postgres-or-sqlite-for-a-small-intern-cdd7092c.md
 ```
 
 In a real run the final answer is the chairman's synthesis, and the cost line shows what
@@ -117,6 +119,17 @@ Environment variables:
 
 `node skills/llm-council/scripts/council.mjs --show-config` prints the config in effect.
 
+## Passing the question
+
+The skill tells Claude to write your question to a file and run
+`council.mjs --question-file <file>`, so the question never goes inside a shell command.
+Questions about code often contain `$(...)`, backticks or quotes, and a shell would run or
+change them. `--question-file -` reads the question from stdin. A plain quoted argument,
+`council.mjs "question"`, still works when you run the script by hand.
+
+This is an instruction to Claude, not a sandbox. Whether you see each command before it runs
+depends on your Claude Code permission settings.
+
 ## Optional requirements
 
 - **1Password CLI (`op`)**, if you keep the key in 1Password. Start Claude Code with
@@ -127,17 +140,32 @@ Environment variables:
 
 1. Every council model gets the question in parallel.
 2. The answers are shuffled and labeled A, B, C... Every model that answered gets all of them,
-   its own included, and returns a JSON ranking. The script averages each answer's position.
+   its own included, and returns a JSON ranking. A ranking counts only if it lists every answer
+   exactly once; others are ignored. The script averages each answer's position over the valid
+   rankings and says how many there were. If none is valid, it says the ranking is unavailable
+   instead of printing an order.
 3. The chairman gets the question, all answers with model names, and all reviews, and writes
    the final answer. It ends with a "Disagreements" section when members disagree.
 
 Every prompt asks the models to answer in the language of your question. If fewer than 2
 models answer in stage 1, the run stops. If the chairman fails, you still get the ranking and
-the transcript. Exit codes: 1 for a bad config or no question, 2 for no API key, 3 for fewer
-than 2 answers.
+the transcript.
+
+When a model stops because it hit its `max_tokens` limit (OpenRouter reports
+`finish_reason: "length"`), the script says so on stderr. A cut-off member answer gets a note
+at its end, so reviewers and the chairman know it is incomplete. A cut-off final answer gets a
+warning at its end that tells you to raise `max_tokens.final`.
+
+Exit codes: 1 for a bad config, no question or an unreadable question file, 2 for no API key,
+3 for fewer than 2 answers, 4 when the transcript folder can't be created or written. The
+script checks that folder before the first paid call, so exit code 4 never costs credits.
 
 Your question goes to OpenRouter and to every model's vendor. Transcripts are saved as `0600`
-files in `~/.config/llm-council/sessions/` and are never deleted by the plugin.
+files in `~/.config/llm-council/sessions/` and are never deleted by the plugin. Each file name
+ends with a random suffix and is created only if it does not exist yet, so two runs at the same
+moment never overwrite each other. If saving still fails at the end of a run (for example a
+full disk), you get the final answer, the ranking and the cost anyway, with a "Transcript not
+saved" line in place of the path.
 
 ## Uninstall
 

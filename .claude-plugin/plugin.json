@@ -1,6 +1,6 @@
 {
   "name": "llm-council",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Ask several LLMs from different vendors through OpenRouter. They answer in parallel, rank each other's answers anonymously, and a chairman model writes the final answer. After Karpathy's llm-council.",
   "author": {
     "name": "Lucas Saldanha Werneck",
