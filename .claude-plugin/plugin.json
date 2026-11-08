@@ -1,7 +1,7 @@
 {
   "name": "llm-council",
-  "version": "0.2.0",
-  "description": "Ask several LLMs from different vendors through OpenRouter. They answer in parallel, rank each other's answers anonymously, and a chairman model writes the final answer. After Karpathy's llm-council.",
+  "version": "0.3.0",
+  "description": "Ask several LLMs from different vendors through OpenRouter. They answer in parallel, rank each other's answers anonymously, and a chairman model writes the final answer. After Karpathy's llm-council. Includes cross-review: the same plan to the council and to Codex, merged.",
   "author": {
     "name": "Lucas Saldanha Werneck",
     "url": "https://github.com/lucas-saldanha-werneck"
@@ -14,6 +14,8 @@
     "multi-model",
     "council",
     "second-opinion",
-    "skill"
+    "skill",
+    "codex",
+    "cross-review"
   ]
 }

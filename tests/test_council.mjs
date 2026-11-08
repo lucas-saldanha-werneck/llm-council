@@ -336,3 +336,273 @@ test("a member answer cut off by the token limit is marked before review", async
   assert.match(review.body.messages[1].content, /partial\n\n\[This answer was cut off at the output token limit\.\]/);
   assert.match(r.stderr, /x-ai\/grok-4\.5.*cut off/);
 });
+
+// ---------- cross-review: council + Codex on the same text ----------
+
+const CROSS = path.join(ROOT, "skills", "cross-review", "scripts", "cross-review.mjs");
+const FAKE_CODEX = `
+import fs from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
+const dir = process.env.FAKE_CODEX_DIR;
+const args = process.argv.slice(2);
+const mode = process.env.FAKE_CODEX_MODE;
+let input = "";
+process.stdin.on("data", d => (input += d));
+process.stdin.on("end", () => {
+  fs.writeFileSync(path.join(dir, "stdin.txt"), input);
+  fs.writeFileSync(path.join(dir, "cwd.txt"), process.cwd());
+  fs.writeFileSync(path.join(dir, "args.json"), JSON.stringify(args));
+  if (mode === "hang") {
+    // A grandchild that keeps the pipes open (like \`sleep 20 &\`), and a codex that never ends.
+    const g = spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)"], { stdio: "inherit" });
+    fs.writeFileSync(path.join(dir, "grandchild.pid"), String(g.pid));
+    setInterval(() => {}, 1000);
+    return;
+  }
+  if (mode === "sigkill") process.kill(process.pid, "SIGKILL");
+  if (mode === "empty") process.exit(0);
+  if (process.env.FAKE_CODEX_FAIL) { process.stderr.write("codex: not logged in\\n"); process.exit(3); }
+  const o = args.indexOf("-o");
+  fs.writeFileSync(args[o + 1], "CODEX FINDINGS: the rollback step is missing (high)");
+  process.stdout.write("progress noise\\n");
+});
+`;
+
+function fakeCodex() {
+  const dir = tmpDir();
+  const file = path.join(dir, "codex.mjs");
+  fs.writeFileSync(file, FAKE_CODEX);
+  return { dir, file, called: () => fs.existsSync(path.join(dir, "args.json")),
+    args: () => JSON.parse(fs.readFileSync(path.join(dir, "args.json"), "utf8")),
+    stdin: () => fs.readFileSync(path.join(dir, "stdin.txt"), "utf8"),
+    cwd: () => fs.readFileSync(path.join(dir, "cwd.txt"), "utf8") };
+}
+
+// Never passes the caller's OPENROUTER_API_KEY or Codex settings: only PATH, HOME and `env`.
+function cross(args, env, input, { cwd, onSpawn } = {}) {
+  return new Promise(resolve => {
+    const clean = { PATH: process.env.PATH, HOME: env.HOME || tmpDir(), ...env };
+    if (IS_WIN) clean.SystemRoot = process.env.SystemRoot;
+    const child = execFile(process.execPath, [CROSS, ...args], { env: clean, cwd, timeout: 60000 }, (err, stdout, stderr) => {
+      resolve({ code: err ? (err.code ?? err.signal) : 0, stdout, stderr });
+    });
+    child.stdin.end(input ?? "");
+    if (onSpawn) onSpawn(child);
+  });
+}
+const IS_WIN = process.platform === "win32";
+const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const waitFor = async (cond, ms = 10000) => {
+  for (const end = Date.now() + ms; Date.now() < end; await new Promise(r => setTimeout(r, 50))) if (cond()) return true;
+  return false;
+};
+
+function planFile(text = "Plan: migrate the users table on Friday night. Option B: wait for Monday. Is A best?") {
+  const f = path.join(tmpDir(), "plan.md");
+  fs.writeFileSync(f, text);
+  return f;
+}
+
+test("cross-review without the codex CLI runs the council alone and says so", async () => {
+  const dir = tmpDir();
+  const r = await cross(["--dry-run", "--plan-file", planFile()], {
+    LLM_COUNCIL_DIR: dir, CROSS_REVIEW_CODEX: path.join(dir, "no-such-codex"),
+  });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /## Council final answer/);
+  assert.match(r.stdout, /Codex is not installed: this is a council-only review/);
+  assert.match(r.stdout, /- Codex: not installed/);
+  assert.match(r.stdout, /- Council: ok/);
+  const files = fs.readdirSync(path.join(dir, "sessions"));
+  assert.ok(files.some(f => /-cross-review-[0-9a-f]{8}\.md$/.test(f)), files.join(","));
+});
+
+test("cross-review sends the same text to the council and to a read-only Codex, in parallel", async () => {
+  const srv = await startServer();
+  const fc = fakeCodex();
+  const plan = 'Run `rm -rf $(pwd)/build` then deploy. Say "go" or "no".';
+  const r = await cross(["--plan-file", planFile(plan)], {
+    LLM_COUNCIL_DIR: tmpDir(), LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k",
+    CROSS_REVIEW_CODEX: fc.file, FAKE_CODEX_DIR: fc.dir,
+  });
+  await srv.close();
+  assert.equal(r.code, 0, r.stderr);
+  const councilText = srv.requests[0].body.messages[1].content;
+  assert.equal(fc.stdin(), councilText, "both reviewers got the same prompt");
+  assert.ok(councilText.includes(plan), "the plan is passed literally, shell characters included");
+  const args = fc.args();
+  assert.deepEqual(args.slice(0, 3), ["exec", "-s", "read-only"]);
+  assert.equal(args[args.length - 1], "-", "Codex reads the plan from stdin, not from its command line");
+  assert.ok(!args.some(a => a.includes("rm -rf")), "the plan is never on Codex's command line");
+  assert.match(r.stdout, /FINAL SYNTHESIS/);
+  assert.match(r.stdout, /CODEX FINDINGS: the rollback step is missing \(high\)/);
+  assert.doesNotMatch(r.stdout, /progress noise/, "the -o last message is used, not Codex's stdout");
+  assert.match(r.stdout, /- Council: ok\n- Codex: ok/);
+});
+
+test("cross-review --no-codex never starts Codex", async () => {
+  const fc = fakeCodex();
+  const r = await cross(["--dry-run", "--no-codex", "--plan-file", planFile()], {
+    LLM_COUNCIL_DIR: tmpDir(), CROSS_REVIEW_CODEX: fc.file, FAKE_CODEX_DIR: fc.dir,
+  });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(fc.called(), false);
+  assert.match(r.stdout, /- Codex: skipped \(--no-codex\)/);
+});
+
+test("cross-review --dry-run does not run Codex either", async () => {
+  const fc = fakeCodex();
+  const r = await cross(["--dry-run", "--plan-file", planFile()], {
+    LLM_COUNCIL_DIR: tmpDir(), CROSS_REVIEW_CODEX: fc.file, FAKE_CODEX_DIR: fc.dir,
+  });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(fc.called(), false);
+  assert.match(r.stdout, /\[dry-run\] Would run: codex exec -s read-only/);
+});
+
+test("cross-review: Codex fails, the council answer is still delivered with Codex's real error", async () => {
+  const srv = await startServer();
+  const fc = fakeCodex();
+  const r = await cross(["--plan-file", planFile()], {
+    LLM_COUNCIL_DIR: tmpDir(), LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k",
+    CROSS_REVIEW_CODEX: fc.file, FAKE_CODEX_DIR: fc.dir, FAKE_CODEX_FAIL: "1",
+  });
+  await srv.close();
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /FINAL SYNTHESIS/);
+  assert.match(r.stdout, /- Codex: failed \(exit 3\)/);
+  assert.match(r.stdout, /codex: not logged in/);
+});
+
+test("cross-review: no reviewer answers -> exit 5 with both errors", async () => {
+  const fc = fakeCodex();
+  const r = await cross(["--plan-file", planFile()], {
+    LLM_COUNCIL_DIR: tmpDir(), CROSS_REVIEW_CODEX: fc.file, FAKE_CODEX_DIR: fc.dir, FAKE_CODEX_FAIL: "1",
+  });
+  assert.equal(r.code, 5);
+  assert.match(r.stdout, /no OpenRouter API key found/);
+  assert.match(r.stdout, /- Council: failed \(exit 2\)/);
+  assert.match(r.stdout, /- Codex: failed \(exit 3\)/);
+});
+
+test("cross-review: plan from stdin; bad arguments exit 1", async () => {
+  const r = await cross(["--dry-run", "--no-codex", "--plan-file", "-"], { LLM_COUNCIL_DIR: tmpDir() }, "Plan from stdin");
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /the plan from stdin \(15 chars\)/);
+  assert.equal((await cross([], { LLM_COUNCIL_DIR: tmpDir() })).code, 1);
+  assert.equal((await cross(["--plan-file", planFile(""), "--dry-run"], { LLM_COUNCIL_DIR: tmpDir() })).code, 1);
+  assert.equal((await cross(["--bogus"], { LLM_COUNCIL_DIR: tmpDir() })).code, 1);
+});
+
+test("cross-review SKILL.md passes the plan by file, never inside a shell command", () => {
+  const skill = fs.readFileSync(path.join(ROOT, "skills", "cross-review", "SKILL.md"), "utf8");
+  assert.match(skill, /^name: cross-review$/m);
+  assert.match(skill, /--plan-file/);
+  assert.match(skill, /\| Finding \| Found by/);
+  // The Bash tool's foreground limit is 600000 ms; a run can take longer, so it goes to the background.
+  assert.match(skill, /run_in_background/);
+  for (const m of skill.matchAll(/(\d{6,}) ?ms/g)) assert.ok(Number(m[1]) <= 600000, m[0]);
+});
+
+// ---------- cross-review: process handling (no network: the council has no API key and fails fast) ----------
+
+test("cross-review: a Codex timeout kills its grandchildren and returns on time", async () => {
+  const fc = fakeCodex();
+  const t0 = Date.now();
+  const r = await cross(["--plan-file", planFile()], {
+    LLM_COUNCIL_DIR: tmpDir(), CROSS_REVIEW_CODEX: fc.file, FAKE_CODEX_DIR: fc.dir,
+    FAKE_CODEX_MODE: "hang", CROSS_REVIEW_TIMEOUT_MS: "1500",
+  });
+  const elapsed = Date.now() - t0;
+  assert.ok(elapsed < 12000, `returned after ${elapsed} ms`);
+  assert.equal(r.code, 5);
+  assert.match(r.stdout, /- Codex: timed out after 1\.5 s/);
+  const pid = Number(fs.readFileSync(path.join(fc.dir, "grandchild.pid"), "utf8"));
+  assert.ok(await waitFor(() => !alive(pid), 5000), "the grandchild was killed too");
+});
+
+test("cross-review: a relative --cd is resolved once (cwd and -C agree)", async () => {
+  const fc = fakeCodex();
+  const parent = tmpDir();
+  fs.mkdirSync(path.join(parent, "sub"));
+  const r = await cross(["--cd", "sub", "--plan-file", planFile()], {
+    LLM_COUNCIL_DIR: tmpDir(), CROSS_REVIEW_CODEX: fc.file, FAKE_CODEX_DIR: fc.dir,
+  }, "", { cwd: parent });
+  assert.equal(r.code, 0, r.stderr);
+  const args = fc.args();
+  const cdArg = args[args.indexOf("-C") + 1];
+  const want = fs.realpathSync(path.join(parent, "sub"));
+  assert.ok(path.isAbsolute(cdArg), cdArg);
+  assert.equal(fs.realpathSync(cdArg), want);
+  assert.equal(fs.realpathSync(fc.cwd()), want);
+});
+
+test("cross-review: Codex killed by a signal is reported as such, not as exit 1",
+  { skip: IS_WIN }, async () => {
+  const fc = fakeCodex();
+  const r = await cross(["--plan-file", planFile()], {
+    LLM_COUNCIL_DIR: tmpDir(), CROSS_REVIEW_CODEX: fc.file, FAKE_CODEX_DIR: fc.dir, FAKE_CODEX_MODE: "sigkill",
+  });
+  assert.equal(r.code, 5);
+  assert.match(r.stdout, /- Codex: killed by SIGKILL/);
+});
+
+test("cross-review: Codex exit 0 with no text is 'answered with no text'", async () => {
+  const fc = fakeCodex();
+  const r = await cross(["--plan-file", planFile()], {
+    LLM_COUNCIL_DIR: tmpDir(), CROSS_REVIEW_CODEX: fc.file, FAKE_CODEX_DIR: fc.dir, FAKE_CODEX_MODE: "empty",
+  });
+  assert.equal(r.code, 5);
+  assert.match(r.stdout, /- Codex: answered with no text/);
+});
+
+test("cross-review: a non-executable `codex` on PATH is not used", { skip: IS_WIN }, async () => {
+  const bin = tmpDir();
+  fs.writeFileSync(path.join(bin, "codex"), "#!/bin/sh\necho hi\n", { mode: 0o644 });
+  // PATH holds only this folder, so a real codex can never be found; --dry-run never starts one anyway.
+  const r = await cross(["--dry-run", "--plan-file", planFile()], { LLM_COUNCIL_DIR: tmpDir(), PATH: bin });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /- Codex: not installed/);
+});
+
+test("cross-review: each council transcript is named after the plan", async () => {
+  const dir = tmpDir();
+  const r = await cross(["--dry-run", "--no-codex", "--plan-file", planFile("Ship the billing v2 rollout\nDetails...")],
+    { LLM_COUNCIL_DIR: dir });
+  assert.equal(r.code, 0, r.stderr);
+  const files = fs.readdirSync(path.join(dir, "sessions"));
+  assert.ok(files.some(f => /plan-review-ship-the-billing-v2-rollout/.test(f)), files.join(","));
+});
+
+test("cross-review: SIGTERM removes the temp folder with the plan and stops Codex", { skip: IS_WIN }, async () => {
+  const fc = fakeCodex();
+  const tmp = tmpDir();
+  const r = await cross(["--plan-file", planFile()], {
+    LLM_COUNCIL_DIR: tmpDir(), CROSS_REVIEW_CODEX: fc.file, FAKE_CODEX_DIR: fc.dir,
+    FAKE_CODEX_MODE: "hang", TMPDIR: tmp,
+  }, "", { onSpawn: async child => {
+    await waitFor(() => fs.existsSync(path.join(fc.dir, "grandchild.pid")));
+    child.kill("SIGTERM");
+  } });
+  assert.equal(r.code, 143);
+  assert.deepEqual(fs.readdirSync(tmp).filter(f => f.startsWith("cross-review-")), []);
+  const pid = Number(fs.readFileSync(path.join(fc.dir, "grandchild.pid"), "utf8"));
+  assert.ok(await waitFor(() => !alive(pid), 5000), "Codex's grandchild was stopped");
+});
+
+test("cross-review: a .cmd codex gets paths with % ! & and spaces literally (Windows)",
+  { skip: !IS_WIN }, async () => {
+  const fc = fakeCodex();
+  const shim = path.join(fc.dir, "codex.cmd");
+  fs.writeFileSync(shim, `@"${process.execPath}" "%~dp0codex.mjs" %*\r\n`);
+  const cd = path.join(tmpDir(), "a b&c %PATH% !x! (1)");
+  fs.mkdirSync(cd);
+  const r = await cross(["--cd", cd, "--plan-file", planFile()], {
+    LLM_COUNCIL_DIR: tmpDir(), CROSS_REVIEW_CODEX: shim, FAKE_CODEX_DIR: fc.dir,
+  });
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  const args = fc.args();
+  assert.equal(args[args.indexOf("-C") + 1], cd);
+  assert.match(r.stdout, /- Codex: ok/);
+});
