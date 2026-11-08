@@ -1,0 +1,19 @@
+{
+  "name": "llm-council",
+  "version": "0.1.0",
+  "description": "Ask several LLMs from different vendors through OpenRouter. They answer in parallel, rank each other's answers anonymously, and a chairman model writes the final answer. After Karpathy's llm-council.",
+  "author": {
+    "name": "Lucas Saldanha Werneck",
+    "url": "https://github.com/lucas-saldanha-werneck"
+  },
+  "homepage": "https://github.com/lucas-saldanha-werneck/llm-council",
+  "repository": "https://github.com/lucas-saldanha-werneck/llm-council",
+  "license": "MIT",
+  "keywords": [
+    "openrouter",
+    "multi-model",
+    "council",
+    "second-opinion",
+    "skill"
+  ]
+}

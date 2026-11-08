@@ -1,0 +1,15 @@
+{
+  "name": "llm-council",
+  "description": "Ask a council of LLMs from different vendors from inside Claude Code.",
+  "owner": {
+    "name": "Lucas Saldanha Werneck",
+    "url": "https://github.com/lucas-saldanha-werneck"
+  },
+  "plugins": [
+    {
+      "name": "llm-council",
+      "source": "./",
+      "description": "Ask several LLMs from different vendors through OpenRouter. They answer in parallel, rank each other's answers anonymously, and a chairman model writes the final answer. After Karpathy's llm-council."
+    }
+  ]
+}
