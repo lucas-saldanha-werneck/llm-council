@@ -48,8 +48,8 @@ path. The transcript has every model's full answer and every review.
 You need Node.js 18 or newer and an [OpenRouter](https://openrouter.ai) API key with credits.
 
 ```
-/plugin marketplace add lucas-saldanha-werneck/llm-council
-/plugin install llm-council@llm-council
+/plugin marketplace add lucas-saldanha-werneck/claude-plugins
+/plugin install llm-council@lucas-plugins
 ```
 
 Then give the script your key. Either set it in the environment you start Claude Code from:
@@ -79,7 +79,7 @@ final answer. That is about 37,000 input and 9,600 output tokens, and comes to a
 US$0.45 per run. Most of it is the chairman and Claude Fable 5, the most expensive model in
 the set. Long questions, long answers and models that bill reasoning tokens cost more.
 
-## Config
+## Settings
 
 The defaults are in `skills/llm-council/config.json`. To change them, create
 `~/.config/llm-council/config.json` with only the keys you want to override. Don't edit the
@@ -232,8 +232,7 @@ saved" line in place of the path.
 ## Uninstall
 
 ```
-/plugin uninstall llm-council@llm-council
-/plugin marketplace remove llm-council
+/plugin uninstall llm-council@lucas-plugins
 ```
 
 Your config, key file and transcripts stay in `~/.config/llm-council/`. Delete that folder to

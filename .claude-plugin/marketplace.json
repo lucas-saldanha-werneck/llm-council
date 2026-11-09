@@ -9,7 +9,7 @@
     {
       "name": "llm-council",
       "source": "./",
-      "description": "Ask several LLMs from different vendors through OpenRouter. They answer in parallel, rank each other's answers anonymously, and a chairman model writes the final answer. After Karpathy's llm-council. Includes cross-review: the same plan to the council and to Codex, merged."
+      "description": "Asks several LLMs through OpenRouter; they rank each other's answers and one writes the final answer."
     }
   ]
 }
