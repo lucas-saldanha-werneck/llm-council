@@ -48,7 +48,7 @@ path. The transcript has every model's full answer and every review.
 You need Node.js 18 or newer and an [OpenRouter](https://openrouter.ai) API key with credits.
 
 ```
-/plugin marketplace add lucas-saldanha-werneck/claude-plugins
+/plugin marketplace add lucas-saldanha-werneck/lucas-tools
 /plugin install llm-council@lucas-tools
 ```
 

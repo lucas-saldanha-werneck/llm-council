@@ -1,6 +1,6 @@
 {
   "name": "llm-council",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Asks several LLMs through OpenRouter; they rank each other's answers and one writes the final answer.",
   "author": {
     "name": "Lucas Saldanha Werneck",
