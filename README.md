@@ -49,7 +49,7 @@ You need Node.js 18 or newer and an [OpenRouter](https://openrouter.ai) API key 
 
 ```
 /plugin marketplace add lucas-saldanha-werneck/claude-plugins
-/plugin install llm-council@lucas-plugins
+/plugin install llm-council@lucas-tools
 ```
 
 Then give the script your key. Either set it in the environment you start Claude Code from:
@@ -232,7 +232,7 @@ saved" line in place of the path.
 ## Uninstall
 
 ```
-/plugin uninstall llm-council@lucas-plugins
+/plugin uninstall llm-council@lucas-tools
 ```
 
 Your config, key file and transcripts stay in `~/.config/llm-council/`. Delete that folder to
