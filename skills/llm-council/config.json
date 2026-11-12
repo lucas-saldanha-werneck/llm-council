@@ -8,5 +8,7 @@
   "chairman": { "model": "anthropic/claude-fable-5", "fallback": "anthropic/claude-opus-4.8" },
   "max_tokens": { "answer": 8000, "review": 3000, "final": 12000 },
   "temperature": 0.7,
-  "timeout_ms": 240000
+  "timeout_ms": 240000,
+  "retries": 2,
+  "retry_delay_ms": 2000
 }

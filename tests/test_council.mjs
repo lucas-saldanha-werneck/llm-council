@@ -46,6 +46,7 @@ async function startServer(behavior = () => null) {
       const body = JSON.parse(raw);
       requests.push({ headers: req.headers, body });
       const override = behavior(body.model, body);
+      if (override?.hang) return; // never answers
       if (override) {
         res.writeHead(override.status, { "Content-Type": "application/json" });
         return res.end(JSON.stringify(override.body));
@@ -69,19 +70,28 @@ async function startServer(behavior = () => null) {
   });
   await new Promise(r => server.listen(0, "127.0.0.1", r));
   const url = `http://127.0.0.1:${server.address().port}/api/v1/chat/completions`;
-  return { url, requests, close: () => new Promise(r => server.close(r)) };
+  return { url, requests, close: () => new Promise(r => { server.closeAllConnections(); server.close(r); }) };
 }
 
-function run(args, env, input) {
+function run(args, env, input, { onSpawn } = {}) {
   return new Promise(resolve => {
     const home = env.HOME || tmpDir();
     const clean = { PATH: process.env.PATH, HOME: home, ...env };
     const child = execFile(process.execPath, [SCRIPT, ...args], { env: clean, timeout: 30000 }, (err, stdout, stderr) => {
-      resolve({ code: err ? err.code : 0, stdout, stderr });
+      resolve({ code: err ? (err.code ?? err.signal) : 0, stdout, stderr });
     });
     child.stdin.end(input ?? "");
+    if (onSpawn) onSpawn(child);
   });
 }
+// A user config that makes retries of 429/5xx fast in tests.
+function fastRetryDir(extra = {}) {
+  const dir = tmpDir();
+  fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({ retry_delay_ms: 10, ...extra }));
+  return dir;
+}
+const sessionText = dir => fs.readdirSync(path.join(dir, "sessions"))
+  .map(f => fs.readFileSync(path.join(dir, "sessions", f), "utf8")).join("\n");
 
 const TWO = { LLM_COUNCIL_MODELS: "openai/gpt-5.6-terra,x-ai/grok-4.5", LLM_COUNCIL_CHAIRMAN: "c/chair" };
 
@@ -155,12 +165,17 @@ test("a model that returns 404 is replaced by its fallback", async () => {
 test("fewer than 2 answers: exit code 3", async () => {
   const srv = await startServer(model =>
     model !== "x-ai/grok-4.5" ? { status: 402, body: { error: { message: "Insufficient credits" } } } : null);
+  const dir = tmpDir();
   const r = await run(["q"], {
-    LLM_COUNCIL_DIR: tmpDir(), LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k",
+    LLM_COUNCIL_DIR: dir, LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k",
   });
   await srv.close();
   assert.equal(r.code, 3);
   assert.match(r.stderr, /fewer than 2 members answered/);
+  // The one paid answer is kept in a transcript, and its path is printed.
+  assert.match(sessionText(dir), /ANSWER FROM x-ai\/grok-4\.5/);
+  assert.match(sessionText(dir), /Insufficient credits/);
+  assert.match(r.stderr, /Partial transcript: .+\.md/);
 });
 
 test("user config file and env vars override the defaults", async () => {
@@ -185,6 +200,7 @@ test("a council with one model is rejected: exit code 1", async () => {
 
 test("chairman failure still prints the ranking and writes the transcript", async () => {
   const dir = tmpDir();
+  fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({ retry_delay_ms: 10 }));
   const srv = await startServer(model =>
     model === "c/chair" ? { status: 500, body: { error: { message: "boom" } } } : null);
   const r = await run(["q"], {
@@ -192,7 +208,8 @@ test("chairman failure still prints the ranking and writes the transcript", asyn
     LLM_COUNCIL_MODELS: "openai/gpt-5.6-terra,x-ai/grok-4.5", LLM_COUNCIL_CHAIRMAN: "c/chair",
   });
   await srv.close();
-  assert.equal(r.code, 0, r.stderr);
+  // No final answer is a failure (exit 5), but the ranking and the transcript are still delivered.
+  assert.equal(r.code, 5, r.stderr);
   assert.match(r.stdout, /Chairman unavailable/);
   assert.match(r.stdout, /\| 1 \| openai\/gpt-5\.6-terra \|/);
   assert.equal(fs.readdirSync(path.join(dir, "sessions")).length, 1);
@@ -302,8 +319,11 @@ test("a transcript write that fails at the end still prints the answer and the c
   const sessions = path.join(dir, "sessions");
   fs.mkdirSync(sessions);
   const srv = await startServer((model, body) => {
-    // The folder becomes read-only while the chairman is working.
-    if (isChairman(body)) fs.chmodSync(sessions, 0o500);
+    // The folder and the transcript saved so far become read-only while the chairman is working.
+    if (isChairman(body)) {
+      for (const f of fs.readdirSync(sessions)) fs.chmodSync(path.join(sessions, f), 0o400);
+      fs.chmodSync(sessions, 0o500);
+    }
     return null;
   });
   const r = await run(["q"], { LLM_COUNCIL_DIR: dir, LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k", ...TWO });
@@ -359,6 +379,12 @@ process.stdin.on("end", () => {
     fs.writeFileSync(path.join(dir, "grandchild.pid"), String(g.pid));
     setInterval(() => {}, 1000);
     return;
+  }
+  if (mode === "orphan") {
+    // Codex exits at once, but leaves a grandchild that keeps the pipes open.
+    const g = spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)"], { stdio: "inherit" });
+    fs.writeFileSync(path.join(dir, "grandchild.pid"), String(g.pid));
+    process.exit(0);
   }
   if (mode === "sigkill") process.kill(process.pid, "SIGKILL");
   if (mode === "empty") process.exit(0);
@@ -605,4 +631,187 @@ test("cross-review: a .cmd codex gets paths with % ! & and spaces literally (Win
   const args = fc.args();
   assert.equal(args[args.indexOf("-C") + 1], cd);
   assert.match(r.stdout, /- Codex: ok/);
+});
+
+// ---------- Round-3 audit regressions (council.mjs) ----------
+
+test("LC-02: a run killed during the chairman keeps stages 1 and 2 in the transcript", async () => {
+  const dir = tmpDir();
+  let chairmanAsked = false;
+  const srv = await startServer((model, body) => {
+    if (isChairman(body)) { chairmanAsked = true; return { hang: true }; }
+    return null;
+  });
+  const r = await run(["q"], { LLM_COUNCIL_DIR: dir, LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k", ...TWO },
+    "", { onSpawn: async child => { await waitFor(() => chairmanAsked); child.kill("SIGTERM"); } });
+  await srv.close();
+  assert.notEqual(r.code, 0);
+  const text = sessionText(dir);
+  assert.match(text, /ANSWER FROM openai\/gpt-5\.6-terra/);
+  assert.match(text, /ANSWER FROM x-ai\/grok-4\.5/);
+  assert.match(text, /## Cross-reviews \(stage 2\)/);
+  assert.match(text, /"ranking"/);
+});
+
+test("LC-02: SKILL.md runs the council in the background, not under a 300 s foreground timeout", () => {
+  const skill = fs.readFileSync(path.join(ROOT, "skills", "llm-council", "SKILL.md"), "utf8");
+  assert.match(skill, /run_in_background/);
+  assert.doesNotMatch(skill, /300000/);
+  for (const m of skill.matchAll(/(\d{6,}) ?ms/g)) assert.ok(Number(m[1]) >= 600000, m[0]);
+});
+
+test("LC-06: a review answered by the fallback is attributed to the fallback model", async () => {
+  const dir = tmpDir();
+  const srv = await startServer((model, body) =>
+    isReview(body) && model === "anthropic/claude-fable-5"
+      ? { status: 404, body: { error: { message: "No endpoints found" } } } : null);
+  const r = await run(["q"], { LLM_COUNCIL_DIR: dir, LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k" });
+  await srv.close();
+  assert.equal(r.code, 0, r.stderr);
+  const text = sessionText(dir);
+  assert.match(text, /### Reviewer: anthropic\/claude-opus-4\.8/);
+  assert.doesNotMatch(text, /### Reviewer: anthropic\/claude-fable-5/);
+});
+
+test("LC-07: a commented-out key in .env is ignored", async () => {
+  const srv = await startServer();
+  const dir = tmpDir();
+  const name = "OPENROUTER_API_KEY";
+  fs.writeFileSync(path.join(dir, ".env"), `# ${name}=old-key\n${name}=new-key\n`);
+  const r = await run(["q"], { LLM_COUNCIL_DIR: dir, LLM_COUNCIL_API_URL: srv.url, ...TWO });
+  await srv.close();
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(srv.requests[0].headers.authorization, "Bearer new-key");
+});
+
+test("LC-08: an HTTP 400 that is not 'model not found' does not trigger the fallback", async () => {
+  const srv = await startServer((model, body) =>
+    model === "anthropic/claude-fable-5" && !isReview(body) && !isChairman(body)
+      ? { status: 400, body: { error: { message: "This endpoint's maximum context length is 200000 tokens." } } } : null);
+  const r = await run(["q"], { LLM_COUNCIL_DIR: fastRetryDir(), LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k" });
+  await srv.close();
+  assert.equal(r.code, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /using fallback/);
+  assert.equal(srv.requests.filter(q => q.body.model === "anthropic/claude-opus-4.8").length, 0);
+});
+
+test("LC-08: a 400 'not a valid model ID' still uses the fallback", async () => {
+  const srv = await startServer(model =>
+    model === "anthropic/claude-fable-5" ? { status: 400, body: { error: { message: "anthropic/claude-fable-5 is not a valid model ID" } } } : null);
+  const r = await run(["q"], { LLM_COUNCIL_DIR: fastRetryDir(), LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k" });
+  await srv.close();
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /using fallback anthropic\/claude-opus-4\.8/);
+});
+
+test("LC-08: 429 and 5xx are retried and the member stays in the round", async () => {
+  const seen = {};
+  const srv = await startServer((model, body) => {
+    if (isReview(body) || isChairman(body)) return null;
+    seen[model] = (seen[model] || 0) + 1;
+    if (model === "x-ai/grok-4.5" && seen[model] === 1) return { status: 429, body: { error: { message: "Rate limited" } } };
+    if (model === "openai/gpt-5.6-terra" && seen[model] === 1) return { status: 503, body: { error: { message: "Overloaded" } } };
+    return null;
+  });
+  const r = await run(["q"], { LLM_COUNCIL_DIR: fastRetryDir(), LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k", ...TWO });
+  await srv.close();
+  assert.equal(r.code, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /FAILED/);
+  assert.equal(seen["x-ai/grok-4.5"], 2);
+  assert.equal(seen["openai/gpt-5.6-terra"], 2);
+  assert.equal(r.stdout.split("\n").filter(l => /^\| \d/.test(l)).length, 2);
+});
+
+test("LC-08: a 402 (no credits) is not retried", async () => {
+  const srv = await startServer(model =>
+    model === "x-ai/grok-4.5" ? { status: 402, body: { error: { message: "Insufficient credits" } } } : null);
+  const r = await run(["q"], { LLM_COUNCIL_DIR: fastRetryDir(), LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k", ...TWO });
+  await srv.close();
+  assert.equal(r.code, 3);
+  assert.equal(srv.requests.filter(q => q.body.model === "x-ai/grok-4.5").length, 1);
+});
+
+test("LC-10: an http API URL that is not on this machine is refused before the key is sent", async () => {
+  const r = await run(["q"], { LLM_COUNCIL_DIR: tmpDir(), LLM_COUNCIL_API_URL: "http://example.com/api/v1/chat/completions",
+    OPENROUTER_API_KEY: "k", ...TWO });
+  assert.equal(r.code, 1, r.stderr);
+  assert.match(r.stderr, /LLM_COUNCIL_API_URL must use https/);
+});
+
+test("LC-10: an https API URL on another host gets a warning", async () => {
+  const r = await run(["--dry-run", "q"], { LLM_COUNCIL_DIR: tmpDir(),
+    LLM_COUNCIL_API_URL: "https://example.invalid/api/v1/chat/completions", ...TWO });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /warning: LLM_COUNCIL_API_URL sends your OpenRouter key to example\.invalid/);
+});
+
+// ---------- Round-3 audit regressions (cross-review.mjs) ----------
+
+test("LC-03: a codex found through a relative PATH folder is the one that runs under --cd", async () => {
+  const parent = tmpDir();
+  const other = tmpDir();
+  const marker = tmpDir();
+  for (const [root, who] of [[parent, "RIGHT"], [other, "WRONG"]]) {
+    fs.mkdirSync(path.join(root, "bin"));
+    fs.writeFileSync(path.join(root, "bin", "codex.mjs"),
+      `import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(path.join(marker, "who.txt"))}, ${JSON.stringify(who)});` +
+      `const a = process.argv.slice(2); fs.writeFileSync(a[a.indexOf("-o") + 1], "findings from ${who}");` +
+      `process.stdin.resume(); process.stdin.on("end", () => {});`);
+  }
+  const r = await cross(["--cd", other, "--plan-file", planFile()], {
+    LLM_COUNCIL_DIR: tmpDir(), CROSS_REVIEW_CODEX: "codex.mjs", PATH: "bin" + path.delimiter + process.env.PATH,
+  }, "", { cwd: parent });
+  assert.equal(r.code, 0, r.stderr + r.stdout);
+  assert.equal(fs.readFileSync(path.join(marker, "who.txt"), "utf8"), "RIGHT");
+});
+
+test("LC-04: a timeout kills a grandchild even when Codex itself already exited", { skip: IS_WIN }, async () => {
+  const fc = fakeCodex();
+  const r = await cross(["--plan-file", planFile()], {
+    LLM_COUNCIL_DIR: tmpDir(), CROSS_REVIEW_CODEX: fc.file, FAKE_CODEX_DIR: fc.dir,
+    FAKE_CODEX_MODE: "orphan", CROSS_REVIEW_TIMEOUT_MS: "1500",
+  });
+  assert.equal(r.code, 5);
+  assert.match(r.stdout, /- Codex: timed out/);
+  const pid = Number(fs.readFileSync(path.join(fc.dir, "grandchild.pid"), "utf8"));
+  assert.ok(await waitFor(() => !alive(pid), 5000), "the grandchild was killed");
+});
+
+test("LC-05: the council without a final answer is not counted as ok", async () => {
+  const dir = fastRetryDir();
+  const srv = await startServer((model, body) =>
+    isChairman(body) ? { status: 500, body: { error: { message: "boom" } } } : null);
+  const fc = fakeCodex();
+  const r = await cross(["--plan-file", planFile()], {
+    LLM_COUNCIL_DIR: dir, LLM_COUNCIL_API_URL: srv.url, OPENROUTER_API_KEY: "k",
+    LLM_COUNCIL_MODELS: "openai/gpt-5.6-terra,x-ai/grok-4.5", LLM_COUNCIL_CHAIRMAN: "c/chair",
+    CROSS_REVIEW_CODEX: fc.file, FAKE_CODEX_DIR: fc.dir,
+  });
+  await srv.close();
+  assert.equal(r.code, 0, r.stderr); // Codex answered
+  assert.match(r.stdout, /- Council: no final answer \(chairman failed\)/);
+  assert.match(r.stdout, /Chairman unavailable/);
+  assert.match(r.stdout, /- Codex: ok/);
+});
+
+test("LC-09: --dry-run exits 5 when the council fails, even though Codex is only simulated", async () => {
+  const fc = fakeCodex();
+  const r = await cross(["--dry-run", "--plan-file", planFile()], {
+    LLM_COUNCIL_DIR: tmpDir(), LLM_COUNCIL_MODELS: "a/one", CROSS_REVIEW_CODEX: fc.file, FAKE_CODEX_DIR: fc.dir,
+  });
+  assert.equal(r.code, 5, r.stdout);
+  assert.match(r.stdout, /- Codex: dry-run/);
+  assert.match(r.stdout, /- Council: failed \(exit 1\)/);
+});
+
+test("LC-11: SIGKILL on cross-review still stops Codex and its grandchildren", { skip: IS_WIN }, async () => {
+  const fc = fakeCodex();
+  await cross(["--plan-file", planFile()], {
+    LLM_COUNCIL_DIR: tmpDir(), CROSS_REVIEW_CODEX: fc.file, FAKE_CODEX_DIR: fc.dir, FAKE_CODEX_MODE: "hang",
+  }, "", { onSpawn: async child => {
+    await waitFor(() => fs.existsSync(path.join(fc.dir, "grandchild.pid")));
+    child.kill("SIGKILL");
+  } });
+  const pid = Number(fs.readFileSync(path.join(fc.dir, "grandchild.pid"), "utf8"));
+  assert.ok(await waitFor(() => !alive(pid), 5000), "Codex's grandchild was stopped");
 });

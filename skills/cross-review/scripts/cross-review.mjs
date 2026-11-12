@@ -91,7 +91,8 @@ function findOnPath(name) {
       const p = path.join(dir, name + ext.toLowerCase());
       const q = path.join(dir, name + ext);
       for (const c of [p, q]) {
-        if (usable(c)) return c;
+        // Absolute: a relative PATH folder must not be re-read from Codex's own cwd (--cd).
+        if (usable(c)) return path.resolve(c);
       }
     }
   }
@@ -107,11 +108,32 @@ const cmdArg = s => `"${s.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, "$1$1"
 
 const running = new Set();
 function killTree(child) {
-  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  if (!child.pid) return;
   try {
-    if (IS_WIN) spawn("taskkill", ["/T", "/F", "/PID", String(child.pid)], { stdio: "ignore", windowsHide: true });
-    else process.kill(-child.pid, "SIGKILL"); // the whole process group, grandchildren included
+    // POSIX: the whole process group, grandchildren included, even when the child itself already
+    // exited (a grandchild can outlive it and hold the pipes). ESRCH = group already empty.
+    if (!IS_WIN) process.kill(-child.pid, "SIGKILL");
+    else if (child.exitCode === null && child.signalCode === null) {
+      spawn("taskkill", ["/T", "/F", "/PID", String(child.pid)], { stdio: "ignore", windowsHide: true });
+    }
   } catch { /* already gone */ }
+}
+
+// POSIX: a SIGKILL on this script skips every handler, so each reviewer gets a tiny watchdog in its
+// own process group. It holds a pipe from this script; when the pipe closes (this script is gone,
+// however it ended) it kills the reviewer's group. On a normal finish the watchdog is stopped first.
+const WATCHDOG = "const g = Number(process.argv[1]); const stop = () => { try { process.kill(-g, 'SIGKILL'); } catch {} process.exit(0); };" +
+  " process.stdin.on('end', stop); process.stdin.on('close', stop); process.stdin.on('error', stop); process.stdin.resume();";
+function watchdog(child) {
+  if (IS_WIN || !child.pid) return null;
+  try {
+    const w = spawn(process.execPath, ["-e", WATCHDOG, String(child.pid)], { stdio: ["pipe", "ignore", "ignore"], detached: true });
+    w.on("error", () => {});
+    w.stdin.on("error", () => {});
+    w.unref();
+    w.stdin.unref?.();
+    return w;
+  } catch { return null; }
 }
 
 // Runs a program; stdin text optional. JS files run with this Node (lets tests use a fake codex.mjs).
@@ -131,9 +153,11 @@ function runProgram(file, args, { input = "", cwd, onStderr } = {}) {
     // POSIX: its own process group, so a timeout can kill everything it started.
     const child = spawn(cmd, cmdArgs, { cwd, windowsHide: true, detached: !IS_WIN, ...extra });
     running.add(child);
+    const guard = watchdog(child);
     const finish = (code, signal) => {
       if (done) return;
       done = true; clearTimeout(timer); running.delete(child);
+      if (guard) { try { guard.kill("SIGTERM"); } catch { /* already gone */ } }
       resolve({ code, signal, timedOut, stdout, stderr });
     };
     const timer = setTimeout(() => {
@@ -176,6 +200,8 @@ async function council() {
   const r = await runProgram(process.execPath, args, { onStderr: d => process.stderr.write(`[council] ${d}`) });
   const text = r.stdout.trim();
   if (r.code === 0 && text) return { status: "ok", text };
+  // Exit 5: the members answered and ranked, but the chairman failed. Show what there is; not "ok".
+  if (r.code === 5 && text) return { status: "no final answer (chairman failed)", text };
   const status = failure(r);
   return { status, text: `The council ${status}:\n\n\`\`\`\n${tail(r.stderr || r.stdout) || "(no output)"}\n\`\`\`` };
 }
@@ -224,7 +250,8 @@ try {
 if (!transcript) process.stderr.write(`ERROR: cross-review transcript not saved: ${transcriptError.message}\n`);
 
 // ---------- result ----------
-const ok = [c, x].filter(r => r.status === "ok" || r.status === "dry-run").length;
+// A simulated Codex (--dry-run) proves nothing on its own: a dry run passes only if the council did.
+const ok = [c, x].filter(r => r.status === "ok").length;
 const out = [
   "# Cross-review",
   "",

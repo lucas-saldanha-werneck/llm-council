@@ -103,10 +103,13 @@ bundled file: plugin updates replace it.
 | `max_tokens` | `answer` 8000, `review` 3000, `final` 12000 | Output limit per call, by stage. You can override one stage only. |
 | `temperature` | `0.7` | Sent with every call. |
 | `timeout_ms` | `240000` | Time limit per call. |
+| `retries` | `2` | Extra tries for a call that got HTTP 429 or 5xx. |
+| `retry_delay_ms` | `2000` | First wait before a retry; it doubles each time. A `Retry-After` header wins (max 30 s). |
 
 Claude Fable 5 has `anthropic/claude-opus-4.8` as its fallback in the defaults. The script uses
-a fallback only when the main model returns HTTP 404 or 400, or an error saying the model was
-not found.
+a fallback only when the main model is missing: HTTP 404, or an error saying the model is not a
+valid model or was not found. Other errors, such as a question longer than the model's context,
+do not spend a call on the fallback.
 
 Model ids are listed at [openrouter.ai/models](https://openrouter.ai/models). All five ids above
 were on OpenRouter's public model list on 2026-11-08.
@@ -119,7 +122,7 @@ Environment variables:
 | `LLM_COUNCIL_MODELS` | Comma-separated model ids. Replaces `council`. |
 | `LLM_COUNCIL_CHAIRMAN` | Model id. Replaces `chairman`. |
 | `LLM_COUNCIL_DIR` | Folder for `config.json`, `.env` and `sessions/`. Default `~/.config/llm-council`. |
-| `LLM_COUNCIL_API_URL` | Chat completions URL. Default OpenRouter's. The tests point it at a local fake server. |
+| `LLM_COUNCIL_API_URL` | Chat completions URL. Default OpenRouter's. Must be https (plain http only for localhost); a host other than openrouter.ai gets a warning, since your key is sent there. The tests point it at a local fake server. |
 
 `node skills/llm-council/scripts/council.mjs --show-config` prints the config in effect.
 
@@ -186,7 +189,8 @@ that hits the limit is stopped with every process it started and reported as `ti
 
 If one reviewer fails, you still get the other, with the real error of the one that failed.
 Exit codes: 0 when at least one reviewer answered, 1 for a bad argument or plan file, 5 when
-neither answered. The cross-review transcript (prompt and both answers) is saved as a `0600`
+neither answered. A council whose chairman failed (`no final answer`) and a simulated Codex
+(`--dry-run`) do not count as answers, so `--dry-run` exits 0 only if the council worked. The cross-review transcript (prompt and both answers) is saved as a `0600`
 file next to the council transcripts.
 
 ## Optional requirements
@@ -210,8 +214,9 @@ file next to the council transcripts.
    the final answer. It ends with a "Disagreements" section when members disagree.
 
 Every prompt asks the models to answer in the language of your question. If fewer than 2
-models answer in stage 1, the run stops. If the chairman fails, you still get the ranking and
-the transcript.
+models answer in stage 1, the run stops, and the answer that did come back is kept in a partial
+transcript. If the chairman fails, you still get the ranking and the transcript. The transcript is
+saved after every stage, so a run that is stopped halfway keeps what was already paid for.
 
 When a model stops because it hit its `max_tokens` limit (OpenRouter reports
 `finish_reason: "length"`), the script says so on stderr. A cut-off member answer gets a note
@@ -219,7 +224,8 @@ at its end, so reviewers and the chairman know it is incomplete. A cut-off final
 warning at its end that tells you to raise `max_tokens.final`.
 
 Exit codes: 1 for a bad config, no question or an unreadable question file, 2 for no API key,
-3 for fewer than 2 answers, 4 when the transcript folder can't be created or written. The
+3 for fewer than 2 answers, 4 when the transcript folder can't be created or written, 5 when the
+chairman failed (the ranking and transcript are still delivered). The
 script checks that folder before the first paid call, so exit code 4 never costs credits.
 
 Your question goes to OpenRouter and to every model's vendor. Transcripts are saved as `0600`

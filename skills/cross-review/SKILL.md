@@ -50,6 +50,8 @@ cross-review transcript path (from `## Status`).
   PATH. Codex is optional.
 - One reviewer failed: deliver the other and say which one failed, with the real error from the
   output. Exit code 0 means at least one answered.
+- `- Council: no final answer (chairman failed)`: the council members answered and ranked, but
+  there is no synthesis. Use the ranking shown and say the chairman failed.
 - Exit code 5: neither answered. Show both errors. Council exit code 2 means no OpenRouter key;
   see the llm-council skill for the fixes.
 - Exit code 1: missing or unreadable plan file, or a bad argument.

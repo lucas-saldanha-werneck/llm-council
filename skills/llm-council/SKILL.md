@@ -20,7 +20,7 @@ node "${CLAUDE_PLUGIN_ROOT}/skills/llm-council/scripts/council.mjs" --question-f
 - Never put the question text inside the shell command. Questions often contain `$(...)`, backticks or quotes, and the shell would run or change them. The file path is the only thing that goes in the command.
 - `--question-file -` reads the question from stdin instead.
 - Progress goes to stderr. The final result goes to stdout as markdown.
-- A run usually takes 1 to 3 minutes (three rounds of parallel calls). Use a Bash timeout of at least 300000 ms.
+- Run it with the Bash tool's `run_in_background: true` and wait for the completion notification (don't poll, don't sleep). A run usually takes 1 to 3 minutes, but three rounds of calls of up to 240 s each, plus retries and a fallback, can pass the Bash tool's 10-minute foreground limit. The transcript is saved after every stage, so a run that is stopped still keeps the answers already paid for.
 - Each run spends the user's OpenRouter credits. If the question looks trivial, ask the user before running.
 
 ## What to do with the result
@@ -34,11 +34,12 @@ node "${CLAUDE_PLUGIN_ROOT}/skills/llm-council/scripts/council.mjs" --question-f
 ## Errors
 
 - **Exit code 2 (no API key):** tell the user to set `OPENROUTER_API_KEY` in the environment Claude Code runs in, or to save it in `~/.config/llm-council/.env` as `OPENROUTER_API_KEY=...` with `chmod 600`. Keys are created at https://openrouter.ai/keys and need prepaid credits. Never ask the user to paste the key into the chat.
-- **Exit code 3 (fewer than 2 members answered):** usually no credits left or an OpenRouter outage. The user can check the balance at https://openrouter.ai/credits.
+- **Exit code 3 (fewer than 2 members answered):** usually no credits left or an OpenRouter outage. The user can check the balance at https://openrouter.ai/credits. The answer that did come back, and each member's error, are in the partial transcript named on stderr.
+- **Exit code 5 (chairman failed):** there is no final answer, but the ranking and the transcript are delivered. Say there is no synthesis, show the ranking, and point to the transcript for the individual answers.
 - **Exit code 1:** bad config, missing question or unreadable question file. The message says which.
 - **Exit code 4 (cannot save transcripts):** the sessions folder can't be created or written. Nothing was sent to OpenRouter and no credits were spent. Tell the user the folder from the message, or suggest setting `LLM_COUNCIL_DIR` to a writable folder.
 - **"Transcript not saved" in the result:** the run finished and the answer and cost are valid, but the transcript file could not be written at the end. Tell the user; individual answers can't be read later for that run.
-- **Model gone (404 or 400):** the script already tries the `fallback` model when one is set. If a model was removed from OpenRouter, change it in the user config (below).
+- **Model gone (404, or 400 "not a valid model"):** the script already tries the `fallback` model when one is set. If a model was removed from OpenRouter, change it in the user config (below). Rate limits (429) and server errors (5xx) are retried a few times before a member is dropped.
 
 ## Config
 
