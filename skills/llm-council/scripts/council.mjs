@@ -20,6 +20,24 @@ const USER_DIR = process.env.LLM_COUNCIL_DIR || path.join(os.homedir(), ".config
 const SESSIONS_DIR = path.join(USER_DIR, "sessions");
 const API_URL = process.env.LLM_COUNCIL_API_URL || "https://openrouter.ai/api/v1/chat/completions";
 
+// The API key goes to API_URL: only over https, except to this machine (the tests' fake server).
+{
+  let u;
+  try { u = new URL(API_URL); } catch {
+    console.error(`ERROR: LLM_COUNCIL_API_URL is not a valid URL: ${API_URL}`);
+    process.exit(1);
+  }
+  const local = ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+  if (u.protocol !== "https:" && !(u.protocol === "http:" && local)) {
+    console.error(`ERROR: LLM_COUNCIL_API_URL must use https (got ${u.protocol}//${u.host}); ` +
+      "plain http is allowed only for localhost. Nothing was sent.");
+    process.exit(1);
+  }
+  if (!local && u.hostname !== "openrouter.ai") {
+    console.error(`  warning: LLM_COUNCIL_API_URL sends your OpenRouter key to ${u.hostname}, not openrouter.ai`);
+  }
+}
+
 // ---------- Config: bundled defaults < user config file < env vars ----------
 function readJson(file) {
   try {
@@ -91,7 +109,8 @@ function loadApiKey() {
   if (process.env.OPENROUTER_API_KEY) return process.env.OPENROUTER_API_KEY.trim();
   const envFile = path.join(USER_DIR, ".env");
   if (fs.existsSync(envFile)) {
-    const m = fs.readFileSync(envFile, "utf8").match(/OPENROUTER_API_KEY\s*=\s*["']?([^\s"']+)/);
+    // Anchored at the start of a line, so a commented-out old key ("# OPENROUTER_API_KEY=...") is skipped.
+    const m = fs.readFileSync(envFile, "utf8").match(/^[ \t]*(?:export[ \t]+)?OPENROUTER_API_KEY[ \t]*=[ \t]*["']?([^\s"'#]+)/m);
     if (m) return m[1];
   }
   return null;
@@ -134,7 +153,7 @@ async function callModel(spec, messages, maxTokens) {
       cost: 0, tokens: 0, truncated: false,
     };
   }
-  const attempt = async (model) => {
+  const once = async (model) => {
     const res = await fetch(API_URL, {
       method: "POST",
       signal: AbortSignal.timeout(CONFIG.timeout_ms || 240000),
@@ -155,7 +174,12 @@ async function callModel(spec, messages, maxTokens) {
     if (!res.ok || data.error) {
       const msg = data?.error?.message || `HTTP ${res.status}`;
       const err = new Error(`${model}: ${msg}`);
-      err.modelNotFound = res.status === 404 || res.status === 400 || /not.*(found|valid|exist)/i.test(msg);
+      // Only a missing model goes to the fallback; other 400s (e.g. context too long) would fail there too.
+      err.modelNotFound = res.status === 404 ||
+        /not a valid model|no endpoints found|model\b.*\bnot\b.*\b(found|exist)/i.test(msg);
+      // Rate limits and server errors are passing: retry them.
+      err.retryable = res.status === 429 || res.status >= 500;
+      err.retryAfter = Number(res.headers.get("retry-after")) || 0;
       throw err;
     }
     if (data.usage) {
@@ -168,6 +192,21 @@ async function callModel(spec, messages, maxTokens) {
     const truncated = data.choices[0].finish_reason === "length";
     if (truncated) console.error(`  warning: ${model}: answer cut off at the output token limit (${maxTokens})`);
     return { model, content, truncated, cost: data.usage?.cost || 0, tokens: data.usage?.total_tokens || 0 };
+  };
+  const retries = CONFIG.retries ?? 2;
+  const baseDelay = CONFIG.retry_delay_ms ?? 2000;
+  const attempt = async (model) => {
+    for (let n = 0; ; n++) {
+      try {
+        return await once(model);
+      } catch (e) {
+        if (!e.retryable || n >= retries) throw e;
+        // Exponential backoff; a Retry-After header wins, capped at 30 s.
+        const wait = Math.min(e.retryAfter ? e.retryAfter * 1000 : baseDelay * 2 ** n, 30000);
+        console.error(`  warning: ${e.message}; retrying in ${(wait / 1000).toFixed(1)} s`);
+        await new Promise(r => setTimeout(r, wait));
+      }
+    }
   };
   try {
     return await attempt(spec.model);
@@ -233,6 +272,61 @@ function shuffle(arr) {
   return a;
 }
 
+// ---------- Transcript: saved after every stage, so a run that is stopped keeps what was paid for ----------
+const startedAt = new Date().toISOString();
+const stamp = startedAt.replace(/[:.]/g, "-").slice(0, 19);
+const slug = question.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").slice(0, 50).replace(/^-|-$/g, "");
+let transcriptPath = null, transcriptError = null;
+
+function transcriptText(s) {
+  const t = [];
+  t.push(`# LLM Council: ${startedAt}\n`);
+  t.push(`**Question:** ${question}\n`);
+  if (s.status) t.push(`**Status:** ${s.status}\n`);
+  if (s.finalAnswer !== undefined) {
+    t.push(`## Final answer (Chairman: ${CONFIG.chairman.model})\n\n${s.finalAnswer}\n`);
+    t.push(`## Aggregate ranking\n`);
+    s.board.forEach((b, i) => t.push(`${i + 1}. **${b.model}** (Answer ${b.label}): mean position ${b.mean.toFixed(2)}`));
+    t.push(`\n${s.rankingNote}`);
+  }
+  t.push(`\n## Individual answers (stage 1)\n`);
+  s.labeled.forEach(l => t.push(`### ${l.label}: ${l.model}\n\n${l.content}\n`));
+  if (s.failed.length) {
+    t.push(`### Members that did not answer\n`);
+    s.failed.forEach(f => t.push(`- ${f}`));
+    t.push("");
+  }
+  if (s.reviews) {
+    t.push(`## Cross-reviews (stage 2)\n`);
+    s.reviews.forEach(r => t.push(`### Reviewer: ${r.reviewer}\n\n\`\`\`\n${r.raw}\n\`\`\`\n`));
+  }
+  t.push(`---\nTotal cost: US$ ${totalCost.toFixed(4)} | Tokens: ${totalTokens}`);
+  return t.join("\n");
+}
+
+// The first save creates the file: a random suffix plus exclusive create ("wx"), so concurrent runs
+// never overwrite each other. Later saves rewrite that same file. A failed save is reported, but the
+// paid result is still printed.
+function saveTranscript(s) {
+  const text = transcriptText(s);
+  if (transcriptPath) {
+    try { fs.writeFileSync(transcriptPath, text); transcriptError = null; } catch (e) { transcriptError = e; }
+    return;
+  }
+  for (let tries = 0; tries < 5 && !transcriptPath; tries++) {
+    const name = [stamp, slug, crypto.randomBytes(4).toString("hex")].filter(Boolean).join("-") + ".md";
+    const file = path.join(SESSIONS_DIR, name);
+    try {
+      fs.writeFileSync(file, text, { mode: 0o600, flag: "wx" });
+      transcriptPath = file;
+      transcriptError = null;
+    } catch (e) {
+      transcriptError = e;
+      if (e.code !== "EEXIST") break;
+    }
+  }
+}
+
 // ---------- Pipeline ----------
 const log = (s) => console.error(s); // progress on stderr; result on stdout
 
@@ -244,6 +338,7 @@ const s1 = await Promise.allSettled(
   CONFIG.council.map(spec => callModel(spec, answerPrompt(question), CONFIG.max_tokens.answer))
 );
 const answers = [];
+const failed = [];
 s1.forEach((r, i) => {
   const wanted = CONFIG.council[i].model;
   if (r.status === "fulfilled") {
@@ -252,18 +347,25 @@ s1.forEach((r, i) => {
     answers.push(r.value);
     log(`  ok: ${r.value.model}`);
   } else {
+    failed.push(`${wanted}: ${r.reason.message}`);
     log(`  FAILED: ${wanted}: ${r.reason.message}`);
   }
 });
-if (answers.length < 2) {
-  console.error("\nERROR: fewer than 2 members answered; council aborted.");
-  process.exit(3);
-}
 
 // Anonymize (shuffled labels A, B, C...)
 const labeled = shuffle(answers).map((a, i) => ({
   label: String.fromCharCode(65 + i), model: a.model, content: a.content,
 }));
+
+if (answers.length < 2) {
+  // Keep the answers already paid for.
+  saveTranscript({ status: "Council aborted: fewer than 2 members answered.", labeled, failed });
+  console.error("\nERROR: fewer than 2 members answered; council aborted.");
+  if (transcriptPath && !transcriptError) console.error(`Partial transcript: ${transcriptPath}`);
+  else console.error(`Partial transcript not saved: ${transcriptError?.message}`);
+  process.exit(3);
+}
+saveTranscript({ status: "Stage 1 of 3 done (the run stopped here or is still running).", labeled, failed });
 
 // Stage 2
 log("\n[2/3] Anonymous cross-review...");
@@ -276,12 +378,14 @@ const s2 = await Promise.allSettled(
 const reviews = [];
 s2.forEach((r, i) => {
   if (r.status === "fulfilled") {
-    reviews.push({ reviewer: answers[i].model, raw: r.value.content, parsed: extractJson(r.value.content) });
-    log(`  ok: ${answers[i].model}`);
+    // The model that really wrote the review (it may be a fallback used only in this stage).
+    reviews.push({ reviewer: r.value.model, raw: r.value.content, parsed: extractJson(r.value.content) });
+    log(`  ok: ${r.value.model}`);
   } else {
     log(`  FAILED: ${answers[i].model}: ${r.reason.message}`);
   }
 });
+saveTranscript({ status: "Stage 2 of 3 done (the run stopped here or is still running).", labeled, failed, reviews });
 
 // Aggregate ranking (mean position; lower = better).
 // A ballot counts only if it ranks every answer exactly once; anything else is ignored.
@@ -308,6 +412,7 @@ const rankingNote = validBallots
 // Stage 3
 log("\n[3/3] Chairman synthesizing...");
 let finalAnswer;
+let chairmanFailed = false;
 try {
   const res = await callModel(CONFIG.chairman, chairmanPrompt(question, labeled, reviews), CONFIG.max_tokens.final);
   finalAnswer = res.content;
@@ -317,40 +422,11 @@ try {
   }
   log(`  ok: ${res.model}`);
 } catch (e) {
+  chairmanFailed = true;
   console.error(`\nERROR from chairman: ${e.message}`);
   finalAnswer = "(Chairman unavailable; see the individual answers in the transcript.)";
 }
-
-// ---------- Transcript ----------
-const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-const slug = question.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").slice(0, 50).replace(/^-|-$/g, "");
-const t = [];
-t.push(`# LLM Council: ${new Date().toISOString()}\n`);
-t.push(`**Question:** ${question}\n`);
-t.push(`## Final answer (Chairman: ${CONFIG.chairman.model})\n\n${finalAnswer}\n`);
-t.push(`## Aggregate ranking\n`);
-board.forEach((b, i) => t.push(`${i + 1}. **${b.model}** (Answer ${b.label}): mean position ${b.mean.toFixed(2)}`));
-t.push(`\n${rankingNote}`);
-t.push(`\n## Individual answers (stage 1)\n`);
-labeled.forEach(l => t.push(`### ${l.label}: ${l.model}\n\n${l.content}\n`));
-t.push(`## Cross-reviews (stage 2)\n`);
-reviews.forEach(r => t.push(`### Reviewer: ${r.reviewer}\n\n\`\`\`\n${r.raw}\n\`\`\`\n`));
-t.push(`---\nTotal cost: US$ ${totalCost.toFixed(4)} | Tokens: ${totalTokens}`);
-// A random suffix plus exclusive create ("wx"): concurrent runs never overwrite each other.
-// A failed save is reported, but the paid result is still printed below.
-let transcriptPath = null, transcriptError = null;
-for (let tries = 0; tries < 5 && !transcriptPath; tries++) {
-  const name = [stamp, slug, crypto.randomBytes(4).toString("hex")].filter(Boolean).join("-") + ".md";
-  const file = path.join(SESSIONS_DIR, name);
-  try {
-    fs.writeFileSync(file, t.join("\n"), { mode: 0o600, flag: "wx" });
-    transcriptPath = file;
-  } catch (e) {
-    transcriptError = e;
-    if (e.code !== "EEXIST") break;
-  }
-}
-if (!transcriptPath) console.error(`\nERROR: transcript not saved: ${transcriptError.message}`);
+saveTranscript({ finalAnswer, board, rankingNote, labeled, failed, reviews });
 
 // ---------- Result (stdout) ----------
 const out = [];
@@ -364,6 +440,14 @@ if (board.length) {
   out.push("");
 }
 out.push(rankingNote);
-out.push(`\nCost: US$ ${totalCost.toFixed(4)} | Tokens: ${totalTokens} | ` +
-  (transcriptPath ? `Full transcript: ${transcriptPath}` : `Transcript not saved: ${transcriptError.message}`));
+let where;
+if (!transcriptError) where = `Full transcript: ${transcriptPath}`;
+else {
+  console.error(`\nERROR: transcript not saved: ${transcriptError.message}`);
+  where = `Transcript not saved: ${transcriptError.message}` +
+    (transcriptPath ? ` (an earlier copy, without the final answer, is at ${transcriptPath})` : "");
+}
+out.push(`\nCost: US$ ${totalCost.toFixed(4)} | Tokens: ${totalTokens} | ${where}`);
 console.log(out.join("\n"));
+// No final answer is a failure for callers (exit 5), even though the ranking and transcript are delivered.
+if (chairmanFailed) process.exitCode = 5;
