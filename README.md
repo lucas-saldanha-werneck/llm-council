@@ -5,6 +5,7 @@
 [![Version](https://img.shields.io/badge/version-0.3.6-blue)](CHANGELOG.md)
 [![cross-review score](https://img.shields.io/badge/cross--review%20score-98.8%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator)
 [![llm-council score](https://img.shields.io/badge/llm--council%20score-98.8%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator)
+[![plugin score (proposal)](https://img.shields.io/badge/plugin%20score%20(proposal)-98.8%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator/issues/508)
 
 Ask several LLMs from different vendors the same question from inside Claude Code. Each model
 answers on its own, then ranks the other answers without knowing who wrote them, and a chairman
