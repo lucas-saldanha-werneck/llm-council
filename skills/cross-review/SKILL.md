@@ -1,6 +1,8 @@
 ---
 name: cross-review
 description: Cross-review a plan or decision by outside models. Sends the same text, in parallel, to the LLM council (GPT, Gemini, Grok, Claude via OpenRouter) and to OpenAI Codex in a read-only sandbox, then merges both answers into one table of findings. Codex is optional; without the codex CLI it is a council-only review. Use when the user says "cross-review", "council and codex", "llm council and an adversarial codex", "have the other models check this plan", "check with the council and Codex whether option A is the best", or wants a plan stress-tested by several vendors before acting. Spends the user's OpenRouter credits (and Codex usage, if installed).
+metadata:
+  author: Lucas Saldanha Werneck <lucas@2olhares.com>
 ---
 
 # Cross-review: LLM council + Codex on the same text
@@ -8,6 +10,13 @@ description: Cross-review a plan or decision by outside models. Sends the same t
 Two independent opinions on one plan or decision, at the same time. The script
 `scripts/cross-review.mjs` runs both and prints both answers; your job is to merge them.
 Don't rebuild either reviewer by hand.
+
+## Instructions
+
+1. Put the plan or decision, in full, in a file (use the user's file as is).
+2. Run `cross-review.mjs --plan-file <file>` in the background (see How to run).
+3. Merge the `## LLM council` and `## Codex (read-only)` answers into one findings table plus a recommendation.
+4. Give the council cost and both transcript paths; on a failure, follow When something fails.
 
 ## How to run
 
@@ -57,3 +66,9 @@ cross-review transcript path (from `## Status`).
 - Exit code 1: missing or unreadable plan file, or a bad argument.
 - `timed out after N s`: that reviewer hit the per-reviewer limit (`CROSS_REVIEW_TIMEOUT_MS`,
   default 1500000 = 25 min) and was stopped with everything it started. Deliver the other one.
+
+## Examples
+
+- User: "cross-review this plan" (plan in the conversation). Claude saves it to a temp file, runs the script, and shows one table of findings marked Council / Codex / both.
+- User: "check with the council and Codex whether option A is the best". Claude puts every option in the file so both reviewers see them.
+- User: "have the other models check plan.md, council only". Claude runs the script with `--no-codex` and says it was a council-only review.

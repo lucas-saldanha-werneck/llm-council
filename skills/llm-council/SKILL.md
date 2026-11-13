@@ -1,12 +1,21 @@
 ---
 name: llm-council
 description: Ask a council of LLMs from different vendors (by default GPT-5.6 Terra, Claude Fable 5, Gemini 3.1 Pro and Grok 4.5) through OpenRouter. Each model answers in parallel, then reviews and ranks the other answers anonymously, and a chairman model writes the final answer. Use when the user asks for the "llm council", "ask the council of LLMs", "ask the other models", "what do other LLMs think", "a second opinion from several models or vendors", "compare GPT, Gemini, Grok and Claude", or wants an important decision checked by models from different companies. It spends the user's OpenRouter credits.
+metadata:
+  author: Lucas Saldanha Werneck <lucas@2olhares.com>
 ---
 
 # LLM Council
 
 Runs the three stages of Andrej Karpathy's llm-council by calling the OpenRouter API directly, with no web app.
 The script `scripts/council.mjs` does all of it. Don't rebuild the flow by hand.
+
+## Instructions
+
+1. Write the user's question, unchanged, to a temporary file.
+2. Run `council.mjs --question-file <file>` in the background (see How to run).
+3. Show the chairman's final answer, the ranking table, the cost and the transcript path.
+4. On an error, follow the exit-code list under Errors.
 
 ## How to run
 
@@ -60,3 +69,9 @@ Or set `LLM_COUNCIL_MODELS` (comma-separated model ids) and `LLM_COUNCIL_CHAIRMA
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/skills/llm-council/scripts/council.mjs" --dry-run --question-file "/path/to/question.txt"
 ```
+
+## Examples
+
+- User: "ask the llm council whether we should use Postgres or SQLite for this app". Claude writes the question to a file, runs the council in the background, then shows the final answer, the ranking table, the cost and the transcript path.
+- User: "what do other LLMs think about this plan?". Same flow; the plan goes in the question file.
+- User: "ask the council, but dry run first". Claude adds `--dry-run`: the pipeline runs with fake answers and no credits are spent.
