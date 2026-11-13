@@ -1,11 +1,17 @@
 ---
 name: cross-review
 description: Cross-review a plan or decision by outside models. Sends the same text, in parallel, to the LLM council (GPT, Gemini, Grok, Claude via OpenRouter) and to OpenAI Codex in a read-only sandbox, then merges both answers into one table of findings. Codex is optional; without the codex CLI it is a council-only review. Use when the user says "cross-review", "council and codex", "llm council and an adversarial codex", "have the other models check this plan", "check with the council and Codex whether option A is the best", or wants a plan stress-tested by several vendors before acting. Spends the user's OpenRouter credits (and Codex usage, if installed).
+version: "0.3.6"
 metadata:
   author: Lucas Saldanha Werneck <lucas@2olhares.com>
+  tags: [review, plan, multi-model]
 ---
 
 # Cross-review: LLM council + Codex on the same text
+
+## Purpose
+
+Get two independent reviews of one plan or decision at the same time (the LLM council and Codex), merged into one table of findings.
 
 Two independent opinions on one plan or decision, at the same time. The script
 `scripts/cross-review.mjs` runs both and prints both answers; your job is to merge them.
@@ -66,6 +72,21 @@ cross-review transcript path (from `## Status`).
 - Exit code 1: missing or unreadable plan file, or a bad argument.
 - `timed out after N s`: that reviewer hit the per-reviewer limit (`CROSS_REVIEW_TIMEOUT_MS`,
   default 1500000 = 25 min) and was stopped with everything it started. Deliver the other one.
+
+## Prerequisites
+
+- Node.js and an OpenRouter API key with prepaid credits (see the llm-council skill for where to set it).
+- Optional: the codex CLI, signed in. Without it the run is council-only and says so.
+
+## Limitations
+
+- A run takes 2 to 6 minutes and can take up to 25; it spends the user's OpenRouter credits.
+- Codex always runs read-only and cannot write files.
+
+## Troubleshooting
+
+- Error "Codex: not installed": the review was council-only; Codex is optional.
+- Error exit code 5: neither reviewer answered; show both errors. Exit code 1: missing or unreadable plan file. Details are under When something fails.
 
 ## Examples
 

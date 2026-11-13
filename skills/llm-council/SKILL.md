@@ -1,11 +1,17 @@
 ---
 name: llm-council
 description: Ask a council of LLMs from different vendors (by default GPT-5.6 Terra, Claude Fable 5, Gemini 3.1 Pro and Grok 4.5) through OpenRouter. Each model answers in parallel, then reviews and ranks the other answers anonymously, and a chairman model writes the final answer. Use when the user asks for the "llm council", "ask the council of LLMs", "ask the other models", "what do other LLMs think", "a second opinion from several models or vendors", "compare GPT, Gemini, Grok and Claude", or wants an important decision checked by models from different companies. It spends the user's OpenRouter credits.
+version: "0.3.6"
 metadata:
   author: Lucas Saldanha Werneck <lucas@2olhares.com>
+  tags: [council, llm, openrouter]
 ---
 
 # LLM Council
+
+## Purpose
+
+Ask the same question to several LLMs from different vendors, let them rank each other's answers anonymously, and return a chairman's final answer with the ranking, cost and transcript path.
 
 Runs the three stages of Andrej Karpathy's llm-council by calling the OpenRouter API directly, with no web app.
 The script `scripts/council.mjs` does all of it. Don't rebuild the flow by hand.
@@ -69,6 +75,21 @@ Or set `LLM_COUNCIL_MODELS` (comma-separated model ids) and `LLM_COUNCIL_CHAIRMA
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/skills/llm-council/scripts/council.mjs" --dry-run --question-file "/path/to/question.txt"
 ```
+
+## Prerequisites
+
+- Node.js and an OpenRouter API key (OPENROUTER_API_KEY in the environment or in the user's llm-council env file) with prepaid credits.
+- Models and the chairman come from the default config; the user's own config file overrides them.
+
+## Limitations
+
+- Each run spends the user's OpenRouter credits and takes 1 to 3 minutes, sometimes longer.
+- A review counts toward the ranking only if it ranks every answer exactly once.
+
+## Troubleshooting
+
+- Error exit code 2: no API key. Exit code 3: fewer than 2 members answered (often no credits). Exit code 5: the chairman failed, so only the ranking is delivered.
+- The full list of errors and fixes is under Errors.
 
 ## Examples
 
