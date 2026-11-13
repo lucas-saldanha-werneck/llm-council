@@ -78,8 +78,8 @@ node "${CLAUDE_PLUGIN_ROOT}/skills/llm-council/scripts/council.mjs" --dry-run --
 
 ## Prerequisites
 
-- Node.js and an OpenRouter API key (OPENROUTER_API_KEY in the environment or in the user's llm-council env file) with prepaid credits.
-- Models and the chairman come from the default config; the user's own config file overrides them.
+- Node.js 18 or newer and an OpenRouter API key with prepaid credits (`OPENROUTER_API_KEY` in the environment, or in `~/.config/llm-council/.env`).
+- Models and the chairman come from the default config; `~/.config/llm-council/config.json` overrides them.
 
 ## Limitations
 

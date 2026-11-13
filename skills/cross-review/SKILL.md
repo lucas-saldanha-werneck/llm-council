@@ -75,7 +75,7 @@ cross-review transcript path (from `## Status`).
 
 ## Prerequisites
 
-- Node.js and an OpenRouter API key with prepaid credits (see the llm-council skill for where to set it).
+- Node.js 18 or newer and an OpenRouter API key with prepaid credits (see the llm-council skill for where to set it).
 - Optional: the codex CLI, signed in. Without it the run is council-only and says so.
 
 ## Limitations
