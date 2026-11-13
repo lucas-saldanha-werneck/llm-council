@@ -2,7 +2,9 @@
 
 [![CI](https://github.com/lucas-saldanha-werneck/llm-council/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-saldanha-werneck/llm-council/actions/workflows/test.yml)
 [![License](https://img.shields.io/github/license/lucas-saldanha-werneck/llm-council)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.3.5-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.6-blue)](CHANGELOG.md)
+[![cross-review score](https://img.shields.io/badge/cross--review%20score-98.8%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator)
+[![llm-council score](https://img.shields.io/badge/llm--council%20score-98.8%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator)
 
 Ask several LLMs from different vendors the same question from inside Claude Code. Each model
 answers on its own, then ranks the other answers without knowing who wrote them, and a chairman
