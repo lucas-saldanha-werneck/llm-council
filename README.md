@@ -1,9 +1,23 @@
 # llm-council
 
+[![CI](https://github.com/lucas-saldanha-werneck/llm-council/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-saldanha-werneck/llm-council/actions/workflows/test.yml)
+[![License](https://img.shields.io/github/license/lucas-saldanha-werneck/llm-council)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.3.5-blue)](CHANGELOG.md)
+
 Ask several LLMs from different vendors the same question from inside Claude Code. Each model
 answers on its own, then ranks the other answers without knowing who wrote them, and a chairman
 model writes one final answer. Use it when you want a decision checked by models that weren't
 trained by the same company.
+
+[![llm-council demo: tap to open the video](https://github.com/user-attachments/assets/ffe39d24-87c0-4f3a-9f3c-1d5342afb368)](https://lucas-saldanha-werneck.github.io/llm-council/demo.mp4)
+
+<table>
+<tr>
+<td align="center"><img src="https://github.com/user-attachments/assets/c1e158ce-c4dc-451b-9592-dbd9e76bcea3" alt="Ask the council a question" width="320"><br>Ask the council a question</td>
+<td align="center"><img src="https://github.com/user-attachments/assets/9571eb7c-45a6-4327-9a5b-b912a1778b58" alt="Ranking, answer and cost" width="320"><br>Ranking, answer and cost</td>
+<td align="center"><img src="https://github.com/user-attachments/assets/e0217fd1-ee10-4b13-b8da-8b9f3eda7284" alt="Council and Codex, one table" width="320"><br>Council and Codex, one table</td>
+</tr>
+</table>
 
 The idea and the three stages come from Andrej Karpathy's
 [llm-council](https://github.com/karpathy/llm-council), which is a web app. This plugin runs the
@@ -268,3 +282,7 @@ call the real API or the real Codex.
 MIT. See [LICENSE](LICENSE).
 
 Built with Claude Code
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for what this plugin accesses and how to report a vulnerability.
