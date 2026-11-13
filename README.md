@@ -9,6 +9,16 @@ answers on its own, then ranks the other answers without knowing who wrote them,
 model writes one final answer. Use it when you want a decision checked by models that weren't
 trained by the same company.
 
+[![llm-council demo: tap to open the video](https://github.com/user-attachments/assets/ffe39d24-87c0-4f3a-9f3c-1d5342afb368)](https://lucas-saldanha-werneck.github.io/llm-council/demo.mp4)
+
+<table>
+<tr>
+<td align="center"><img src="https://github.com/user-attachments/assets/c1e158ce-c4dc-451b-9592-dbd9e76bcea3" alt="Ask the council a question" width="320"><br>Ask the council a question</td>
+<td align="center"><img src="https://github.com/user-attachments/assets/9571eb7c-45a6-4327-9a5b-b912a1778b58" alt="Ranking, answer and cost" width="320"><br>Ranking, answer and cost</td>
+<td align="center"><img src="https://github.com/user-attachments/assets/e0217fd1-ee10-4b13-b8da-8b9f3eda7284" alt="Council and Codex, one table" width="320"><br>Council and Codex, one table</td>
+</tr>
+</table>
+
 The idea and the three stages come from Andrej Karpathy's
 [llm-council](https://github.com/karpathy/llm-council), which is a web app. This plugin runs the
 same flow as a Claude Code skill: one Node script that calls the OpenRouter API, with no server
