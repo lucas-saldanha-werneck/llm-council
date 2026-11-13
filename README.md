@@ -1,5 +1,9 @@
 # llm-council
 
+[![CI](https://github.com/lucas-saldanha-werneck/llm-council/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-saldanha-werneck/llm-council/actions/workflows/test.yml)
+[![License](https://img.shields.io/github/license/lucas-saldanha-werneck/llm-council)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.3.5-blue)](CHANGELOG.md)
+
 Ask several LLMs from different vendors the same question from inside Claude Code. Each model
 answers on its own, then ranks the other answers without knowing who wrote them, and a chairman
 model writes one final answer. Use it when you want a decision checked by models that weren't
@@ -268,3 +272,7 @@ call the real API or the real Codex.
 MIT. See [LICENSE](LICENSE).
 
 Built with Claude Code
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for what this plugin accesses and how to report a vulnerability.
