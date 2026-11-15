@@ -2,6 +2,10 @@
 
 All notable changes to this plugin. Versions follow `.claude-plugin/plugin.json`.
 
+## 0.3.7 (2026-11-15)
+
+- Tests: every temp folder is removed when the suite ends, and the fake Codex and its grandchild are killed; a new test runs the suite in its own temp folder and checks that nothing is left. The plugin code is unchanged (a timeout, SIGTERM and SIGKILL already stop Codex's whole process group).
+
 ## 0.3.6 (2026-11-13)
 
 - Both skills: version and tags, plus Purpose, Prerequisites, Limitations and Troubleshooting sections.
