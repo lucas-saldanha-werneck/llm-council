@@ -1,7 +1,7 @@
 ---
 name: llm-council
 description: Ask a council of LLMs from different vendors (by default GPT-5.6 Terra, Claude Fable 5, Gemini 3.1 Pro and Grok 4.5) through OpenRouter. Each model answers in parallel, then reviews and ranks the other answers anonymously, and a chairman model writes the final answer. Use when the user asks for the "llm council", "ask the council of LLMs", "ask the other models", "what do other LLMs think", "a second opinion from several models or vendors", "compare GPT, Gemini, Grok and Claude", or wants an important decision checked by models from different companies. It spends the user's OpenRouter credits.
-version: "0.3.6"
+version: "0.3.7"
 metadata:
   author: Lucas Saldanha Werneck <lucas@2olhares.com>
   tags: [council, llm, openrouter]
