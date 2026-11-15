@@ -1,7 +1,7 @@
 // Tests for council.mjs. No real API calls: a local HTTP server stands in for OpenRouter.
 // Run: node --test tests/test_council.mjs
 
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import fs from "node:fs";
@@ -17,9 +17,34 @@ const SCRIPT = path.join(ROOT, "skills", "llm-council", "scripts", "council.mjs"
 const PREFERENCE = ["openai/gpt-5.6-terra", "google/gemini-3.1-pro-preview", "x-ai/grok-4.5",
   "anthropic/claude-fable-5", "anthropic/claude-opus-4.8"];
 
+// Every folder a test makes is remembered and removed when the file ends (pass or fail), after
+// stopping any process the fake Codex left behind (its pid and its grandchild's pid are on disk).
+const MADE = new Set();
 function tmpDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "llm-council-test-"));
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "llm-council-test-"));
+  MADE.add(d);
+  return d;
 }
+function stopLeftovers() {
+  if (!MADE.size) return;
+  const pids = [];
+  for (const d of MADE) {
+    for (const [name, group] of [["codex.pid", true], ["grandchild.pid", false]]) {
+      let pid;
+      try { pid = Number(fs.readFileSync(path.join(d, name), "utf8")); } catch { continue; }
+      if (!pid) continue;
+      pids.push(pid);
+      // The fake Codex is a group leader (cross-review starts it detached): kill the whole group.
+      if (group && process.platform !== "win32") { try { process.kill(-pid, "SIGKILL"); } catch { /* gone */ } }
+      try { process.kill(pid, "SIGKILL"); } catch { /* gone */ }
+    }
+  }
+  if (process.env.LLM_COUNCIL_TEST_PIDLOG) fs.writeFileSync(process.env.LLM_COUNCIL_TEST_PIDLOG, pids.join("\n"));
+  for (const d of MADE) fs.rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  MADE.clear();
+}
+after(stopLeftovers);
+process.on("exit", stopLeftovers); // also when the run is interrupted
 
 // Labels in a review prompt, ordered by PREFERENCE (best first).
 function preferredLabels(body) {
@@ -373,6 +398,7 @@ process.stdin.on("end", () => {
   fs.writeFileSync(path.join(dir, "stdin.txt"), input);
   fs.writeFileSync(path.join(dir, "cwd.txt"), process.cwd());
   fs.writeFileSync(path.join(dir, "args.json"), JSON.stringify(args));
+  fs.writeFileSync(path.join(dir, "codex.pid"), String(process.pid));
   if (mode === "hang") {
     // A grandchild that keeps the pipes open (like \`sleep 20 &\`), and a codex that never ends.
     const g = spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)"], { stdio: "inherit" });
